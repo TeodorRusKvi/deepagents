@@ -1318,7 +1318,9 @@ def cli_main() -> None:
                     )
                     sys.exit(1)
                 if not available:
-                    console.print(f"Already on the latest version (v{cli_version}).")
+                    console.print(
+                        f"Already on the latest version (v{latest or cli_version})."
+                    )
                     sys.exit(0)
 
                 console.print(

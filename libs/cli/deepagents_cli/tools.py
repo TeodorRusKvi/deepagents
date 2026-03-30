@@ -78,6 +78,7 @@ def http_request(
         return {
             "success": response.status_code < 400,  # noqa: PLR2004  # HTTP status code threshold
             "status_code": response.status_code,
+            "reason": response.reason,
             "headers": dict(response.headers),
             "content": content,
             "url": response.url,
@@ -92,12 +93,24 @@ def http_request(
             "url": url,
         }
     except requests.exceptions.RequestException as e:
+        response = getattr(e, "response", None)
+        status_code = getattr(response, "status_code", 0) or 0
+        reason = getattr(response, "reason", None)
+        headers = dict(getattr(response, "headers", {}) or {})
+        body: str | None = None
+        if response is not None:
+            try:
+                body = response.text
+            except Exception:  # noqa: BLE001
+                body = None
         return {
             "success": False,
-            "status_code": 0,
-            "headers": {},
-            "content": f"Request error: {e!s}",
+            "status_code": status_code,
+            "reason": reason,
+            "headers": headers,
+            "content": body if body else f"Request error: {e!s}",
             "url": url,
+            "error": type(e).__name__,
         }
 
 
@@ -221,16 +234,35 @@ def fetch_url(url: str, timeout: int = 30) -> dict[str, Any]:
             timeout=timeout,
             headers={"User-Agent": "Mozilla/5.0 (compatible; DeepAgents/1.0)"},
         )
-        response.raise_for_status()
 
-        # Convert HTML content to markdown
+        # Convert HTML content to markdown even for non-2xx responses so the
+        # agent can inspect error pages instead of only seeing an exception.
         markdown_content = markdownify(response.text)
 
         return {
             "url": str(response.url),
             "markdown_content": markdown_content,
             "status_code": response.status_code,
+            "reason": response.reason,
             "content_length": len(markdown_content),
+            "success": response.status_code < 400,  # noqa: PLR2004
         }
     except requests.exceptions.RequestException as e:
-        return {"error": f"Fetch URL error: {e!s}", "url": url}
+        response = getattr(e, "response", None)
+        status_code = getattr(response, "status_code", 0) or 0
+        reason = getattr(response, "reason", None)
+        body: str | None = None
+        if response is not None:
+            try:
+                body = response.text
+            except Exception:  # noqa: BLE001
+                body = None
+        return {
+            "error": f"Fetch URL error: {e!s}",
+            "error_type": type(e).__name__,
+            "url": url,
+            "status_code": status_code,
+            "reason": reason,
+            "response_text": body,
+            "success": False,
+        }

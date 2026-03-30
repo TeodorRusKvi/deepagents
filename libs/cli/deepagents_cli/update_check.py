@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 CACHE_FILE: Path = DEFAULT_CONFIG_DIR / "latest_version.json"
 SEEN_VERSION_FILE: Path = DEFAULT_CONFIG_DIR / "seen_version.json"
 CACHE_TTL = 86_400  # 24 hours
+PYPI_TIMEOUT = (3.05, 10)
 
 InstallMethod = Literal["uv", "pip", "brew", "unknown"]
 
@@ -140,11 +141,7 @@ def get_latest_version(
         return None
 
     try:
-        resp = requests.get(
-            PYPI_URL,
-            headers={"User-Agent": USER_AGENT},
-            timeout=3,
-        )
+        resp = requests.get(PYPI_URL, headers={"User-Agent": USER_AGENT}, timeout=PYPI_TIMEOUT)
         resp.raise_for_status()
         payload = resp.json()
         stable: str = payload["info"]["version"]
@@ -152,8 +149,8 @@ def get_latest_version(
         if not releases:
             logger.debug("PyPI response missing or empty 'releases' key")
         prerelease = _latest_from_releases(releases, include_prereleases=True)
-    except (requests.RequestException, OSError, KeyError, json.JSONDecodeError):
-        logger.debug("Failed to fetch latest version from PyPI", exc_info=True)
+    except (requests.RequestException, OSError, KeyError, json.JSONDecodeError) as exc:
+        logger.debug("Failed to fetch latest version from PyPI: %s", exc, exc_info=True)
         return None
 
     try:
@@ -216,7 +213,7 @@ def is_update_available(*, bypass_cache: bool = False) -> tuple[bool, str | None
     except InvalidVersion:
         logger.debug("Failed to compare versions", exc_info=True)
 
-    return False, None
+    return False, latest
 
 
 # ---------------------------------------------------------------------------
