@@ -284,7 +284,8 @@ class StoreBackend(BackendProtocol):
         """
         raw_content = store_item.value.get("content")
         if raw_content is None:
-            msg = f"Store item does not contain valid content field. Got: {store_item.value.keys()}"
+            msg = f"Store item does not contain valid content field. Namespace: {store_item.namespace} Key: {store_item.key} Keys present: {list(store_item.value.keys())}"
+            print(f"DEBUG-CONVERT: {msg}")
             raise ValueError(msg)
 
         # BACKWARDS COMPAT: legacy list[str] format
@@ -383,6 +384,35 @@ class StoreBackend(BackendProtocol):
 
         return all_items
 
+    async def _asearch_store_paginated(
+        self,
+        store: BaseStore,
+        namespace: tuple[str, ...],
+        *,
+        query: str | None = None,
+        filter: dict[str, Any] | None = None,  # noqa: A002  # Matches LangGraph BaseStore.search() API
+        page_size: int = 100,
+    ) -> list[Item]:
+        """Async version of _search_store_paginated."""
+        all_items: list[Item] = []
+        offset = 0
+        while True:
+            page_items = await store.asearch(
+                namespace,
+                query=query,
+                filter=filter,
+                limit=page_size,
+                offset=offset,
+            )
+            if not page_items:
+                break
+            all_items.extend(page_items)
+            if len(page_items) < page_size:
+                break
+            offset += page_size
+
+        return all_items
+
     def ls(self, path: str) -> LsResult:
         """List files and directories in the specified directory (non-recursive).
 
@@ -398,26 +428,120 @@ class StoreBackend(BackendProtocol):
 
         # Retrieve all items and filter by path prefix locally to avoid
         # coupling to store-specific filter semantics
+        # Normalize path to have trailing slash for proper prefix matching
+        search_prefix = path.strip("/")
+        if search_prefix:
+            search_prefix += "/"
+
+        # (DEBUG) Log the start of ls processing
+        import logging
+
+        sdk_logger = logging.getLogger("ap_server.sdk")
+        sdk_logger.info(
+            "🔍 [SDK-STORE] ls start: ns=%r path=%r search_prefix=%r",
+            namespace,
+            path,
+            search_prefix,
+        )
         items = self._search_store_paginated(store, namespace)
+        sdk_logger.info("📊 [SDK-STORE] ls search returned %s items", len(items))
+
         infos: list[FileInfo] = []
         subdirs: set[str] = set()
 
-        # Normalize path to have trailing slash for proper prefix matching
-        normalized_path = path if path.endswith("/") else path + "/"
-
         for item in items:
+            key_str = str(item.key).lstrip("/")
+
             # Check if file is in the specified directory or a subdirectory
-            if not str(item.key).startswith(normalized_path):
+            if not key_str.startswith(search_prefix):
+                sdk_logger.info(f"⏭️ [SDK-STORE] Filtered: key={item.key!r} (No prefix match: {search_prefix!r})")
                 continue
 
             # Get the relative path after the directory
-            relative = str(item.key)[len(normalized_path) :]
+            relative = key_str[len(search_prefix) :]
 
             # If relative path contains '/', it's in a subdirectory
             if "/" in relative:
+                sdk_logger.info(f"⏭️ [SDK-STORE] Filtered: key={item.key!r} (Subdir match: {relative!r})")
                 # Extract the immediate subdirectory name
                 subdir_name = relative.split("/")[0]
-                subdirs.add(normalized_path + subdir_name + "/")
+
+                # Reconstruct path using original path format (absolute if path was absolute)
+                base = "/" if path.startswith("/") else ""
+                subdirs.add(f"{base}{search_prefix}{subdir_name}/")
+                continue
+
+            # This is a file directly in the current directory
+            try:
+                fd = self._convert_store_item_to_file_data(item)
+            except ValueError:
+                continue
+            # BACKWARDS COMPAT: handle legacy list[str] content for size computation
+            raw = fd.get("content", "")
+            size = len("\n".join(raw)) if isinstance(raw, list) else len(raw)
+            infos.append(
+                {
+                    "path": item.key,
+                    "is_dir": False,
+                    "size": int(size),
+                    "modified_at": fd.get("modified_at", ""),
+                }
+            )
+
+        # Add directories to the results
+        infos.extend(FileInfo(path=subdir, is_dir=True, size=0, modified_at="") for subdir in sorted(subdirs))
+
+        infos.sort(key=lambda x: x.get("path", ""))
+        return LsResult(entries=infos)
+
+    async def als(self, path: str) -> LsResult:
+        """Async version of ls."""
+        store = self._get_store()
+        namespace = self._get_namespace()
+
+        # Normalize path to have trailing slash for proper prefix matching
+        search_prefix = path.strip("/")
+        if search_prefix:
+            search_prefix += "/"
+
+        # (DEBUG) Log the start of ls processing
+        import logging
+
+        sdk_logger = logging.getLogger("ap_server.sdk")
+        print(f"DEBUG-SDK: als start! path={path} ns={namespace}")
+        items = await self._asearch_store_paginated(store, namespace)
+        print(f"DEBUG-SDK: als matched {len(items)} items from store")
+        sdk_logger.info(
+            "🔍 [SDK-STORE] als start: ns=%r path=%r search_prefix=%r",
+            namespace,
+            path,
+            search_prefix,
+        )
+        sdk_logger.info("📊 [SDK-STORE] als search returned %s items", len(items))
+
+        infos: list[FileInfo] = []
+        subdirs: set[str] = set()
+
+        for item in items:
+            key_str = str(item.key).lstrip("/")
+
+            # Check if file is in the specified directory or a subdirectory
+            if not key_str.startswith(search_prefix):
+                sdk_logger.info(f"⏭️ [SDK-STORE] Filtered: key={item.key!r} (No prefix match: {search_prefix!r})")
+                continue
+
+            # Get the relative path after the directory
+            relative = key_str[len(search_prefix) :]
+
+            # If relative path contains '/', it's in a subdirectory
+            if "/" in relative:
+                sdk_logger.info(f"⏭️ [SDK-STORE] Filtered: key={item.key!r} (Subdir match: {relative!r})")
+                # Extract the immediate subdirectory name
+                subdir_name = relative.split("/")[0]
+
+                # Reconstruct path using original path format (absolute if path was absolute)
+                base = "/" if path.startswith("/") else ""
+                subdirs.add(f"{base}{search_prefix}{subdir_name}/")
                 continue
 
             # This is a file directly in the current directory

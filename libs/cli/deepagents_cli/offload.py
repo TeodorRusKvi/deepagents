@@ -7,12 +7,17 @@ tested independently of the Textual app.
 from __future__ import annotations
 
 import logging
+import os
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
-from langchain_core.messages import get_buffer_string
-from langchain_core.messages.utils import count_tokens_approximately
+from langchain_core.messages import AnyMessage, HumanMessage, get_buffer_string, message_to_dict
+from langchain_core.messages.utils import (
+    count_tokens_approximately,
+    convert_to_messages,
+)
 
 from deepagents_cli.config import create_model
 from deepagents_cli.textual_adapter import format_token_count
@@ -120,6 +125,113 @@ def format_offload_limit(
     return "current retention threshold"
 
 
+def _sanitize_message_content(messages: list[AnyMessage]) -> list[AnyMessage]:
+    sanitized = []
+    for msg in messages:
+        if isinstance(msg.content, bytes):
+            try:
+                # Attempt to decode, fallback to placeholder
+                decoded_content = msg.content.decode("utf-8")
+            except UnicodeDecodeError:
+                decoded_content = "<Binary content (offloaded to file)>"
+                logger.warning("Binary content detected in message; replacing with placeholder.")
+            sanitized.append(msg.__class__(
+                content=decoded_content,
+                additional_kwargs=msg.additional_kwargs,
+                example=msg.example,
+                name=msg.name,
+                id=msg.id,
+            ))
+        else:
+            sanitized.append(msg)
+    return sanitized
+
+def _normalize_messages(messages: list[Any]) -> list[Any]:
+    """Convert OpenAI-style dict messages into LangChain message objects.
+
+    The CLI can receive history from remote checkpoints or older state
+    snapshots as plain dictionaries. DeepAgents' summarization middleware
+    expects BaseMessage instances, so we normalize here before offloading.
+    """
+    if not messages:
+        return messages
+
+    if any(isinstance(message, dict) for message in messages):
+        # LangChain's convert_to_messages expects 'role' in flat dicts, but
+        # state snapshots might use 'type' (e.g. from pydantic serialization).
+        normalized = []
+        for msg in messages:
+            if isinstance(msg, dict) and "type" in msg and "role" not in msg:
+                # Map standard LC types to roles so convert_to_messages succeeds in environments
+                # where the flat-dict-with-type format is not natively supported.
+                role_map = {"human": "user", "ai": "assistant", "system": "system", "tool": "tool"}
+                m = msg.copy()
+                m["role"] = role_map.get(msg["type"], msg["type"])
+                normalized.append(m)
+            else:
+                normalized.append(msg)
+        return convert_to_messages(normalized)
+
+    return messages
+
+
+def _coerce_summary_message(message: Any) -> HumanMessage:
+    """Ensure summarization state stores a JSON-serializable `HumanMessage`.
+
+    The summarization middleware may return dict-like payloads or message
+    objects from different runtimes. We always normalize to a `HumanMessage`
+    with primitive (JSON-safe) `additional_kwargs` because state checkpointing
+    rejects nested message objects inside kwargs.
+    """
+    if isinstance(message, HumanMessage):
+        content = message.content
+        additional_kwargs = message.additional_kwargs
+    elif isinstance(message, dict):
+        content = message.get("content", "")
+        additional_kwargs = message.get("additional_kwargs", {})
+    else:
+        content = getattr(message, "content", "")
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+
+    if not isinstance(additional_kwargs, dict):
+        additional_kwargs = {}
+
+    sanitized_kwargs: dict[str, Any] = {}
+    for key, value in additional_kwargs.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            sanitized_kwargs[key] = value
+        elif isinstance(value, list):
+            sanitized_items: list[Any] = []
+            for item in value:
+                if isinstance(item, AnyMessage):
+                    sanitized_items.append(message_to_dict(item))
+                else:
+                    sanitized_items.append(item)
+            sanitized_kwargs[key] = sanitized_items
+        elif isinstance(value, tuple):
+            sanitized_items = []
+            for item in value:
+                if isinstance(item, AnyMessage):
+                    sanitized_items.append(message_to_dict(item))
+                else:
+                    sanitized_items.append(item)
+            sanitized_kwargs[key] = sanitized_items
+        elif isinstance(value, dict):
+            sanitized_dict: dict[str, Any] = {}
+            for nested_key, nested_value in value.items():
+                if isinstance(nested_value, AnyMessage):
+                    sanitized_dict[nested_key] = message_to_dict(nested_value)
+                else:
+                    sanitized_dict[nested_key] = nested_value
+            sanitized_kwargs[key] = sanitized_dict
+        elif isinstance(value, AnyMessage):
+            sanitized_kwargs[key] = message_to_dict(value)
+        else:
+            sanitized_kwargs[key] = str(value)
+
+    return HumanMessage(content=cast(str, content), additional_kwargs=sanitized_kwargs)
+
+
 async def offload_messages_to_backend(
     messages: list[Any],
     middleware: SummarizationMiddleware,
@@ -147,10 +259,13 @@ async def offload_messages_to_backend(
             write failed.
     """
     path = f"/conversation_history/{thread_id}.md"
+    fallback_path = os.path.expanduser(f"~/.deepagents/conversation_history/{thread_id}.md")
 
     # Exclude prior summaries so the offloaded history contains only
     # original messages
-    filtered = middleware._filter_summary_messages(messages)
+    normalized = _normalize_messages(messages)
+    sanitized = _sanitize_message_content(normalized)
+    filtered = middleware._filter_summary_messages(sanitized)
     if not filtered:
         return ""
 
@@ -189,7 +304,16 @@ async def offload_messages_to_backend(
                 path,
                 error_detail,
             )
-            return None
+            fallback_result = await backend.awrite(fallback_path, combined)
+            if fallback_result is None or fallback_result.error:
+                logger.warning(
+                    "Fallback offload also failed for %s: %s",
+                    fallback_path,
+                    fallback_result.error if fallback_result else "backend returned None",
+                )
+                return None
+            logger.debug("Offloaded %d messages to fallback %s", len(filtered), fallback_path)
+            return fallback_path
     except Exception as exc:  # defensive: surface write failures gracefully
         logger.warning(
             "Exception offloading conversation history to %s: %s",
@@ -197,7 +321,25 @@ async def offload_messages_to_backend(
             exc,
             exc_info=True,
         )
-        return None
+        try:
+            fallback_result = await backend.awrite(fallback_path, combined)
+            if fallback_result is None or fallback_result.error:
+                logger.warning(
+                    "Fallback offload also failed for %s: %s",
+                    fallback_path,
+                    fallback_result.error if fallback_result else "backend returned None",
+                )
+                return None
+            logger.debug("Offloaded %d messages to fallback %s", len(filtered), fallback_path)
+            return fallback_path
+        except Exception as fallback_exc:
+            logger.warning(
+                "Exception offloading conversation history to fallback %s: %s",
+                fallback_path,
+                fallback_exc,
+                exc_info=True,
+            )
+            return None
 
     logger.debug("Offloaded %d messages to %s", len(filtered), path)
     return path
@@ -319,7 +461,9 @@ async def perform_offload(
 
     # Rebuild the message list the model would see, accounting for
     # any prior offload
-    effective = middleware._apply_event_to_messages(messages, prior_event)
+    effective = middleware._apply_event_to_messages(
+        _normalize_messages(messages), prior_event
+    )
     cutoff = middleware._determine_cutoff_index(effective)
     budget_str = format_offload_limit(defaults["keep"], context_limit)
 
@@ -360,7 +504,9 @@ async def perform_offload(
         )
     file_path = backend_path or None
 
-    summary_msg = middleware._build_new_messages_with_path(summary, file_path)[0]
+    summary_msg = _coerce_summary_message(
+        middleware._build_new_messages_with_path(summary, file_path)[0]
+    )
 
     # Append token savings note so the model is aware of how much context
     # was reclaimed.

@@ -16,6 +16,7 @@ from deepagents_cli.offload import (
     OffloadResult,
     OffloadThresholdNotMet,
     format_offload_limit,
+    _coerce_summary_message,
     offload_messages_to_backend,
 )
 from deepagents_cli.textual_adapter import format_token_count
@@ -1516,3 +1517,52 @@ class TestPerformOffload:
         assert isinstance(result, OffloadResult)
         assert result.offload_warning is not None
         assert "could not be saved" in result.offload_warning
+
+    async def test_dict_messages_are_normalized_before_offload(self) -> None:
+        """OpenAI-style dict messages should be converted before summarization."""
+        from deepagents_cli.offload import perform_offload
+
+        model_result, mock_mw = _mock_perform_deps(cutoff=3)
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+            {"role": "tool", "content": "result", "tool_call_id": "tc-1"},
+            {"role": "assistant", "content": "done"},
+        ]
+
+        with (
+            patch(_CREATE_MODEL_PATH, return_value=model_result),
+            patch(_COMPUTE_DEFAULTS_PATH, return_value={"keep": ("fraction", 0.1)}),
+            patch(_MW_CLASS_PATH, return_value=mock_mw),
+            patch(_TOKEN_COUNT_PATH, return_value=100),
+            patch(_OFFLOAD_BACKEND_PATH, new_callable=AsyncMock, return_value="/p.md"),
+        ):
+            result = await perform_offload(
+                messages=messages,
+                prior_event=None,
+                thread_id="t1",
+                model_spec="openai:gpt-4",
+                profile_overrides=None,
+                context_limit=None,
+                total_context_tokens=0,
+                backend=MagicMock(),
+            )
+
+        assert isinstance(result, OffloadResult)
+        assert mock_mw._apply_event_to_messages.called
+        normalized_messages = mock_mw._apply_event_to_messages.call_args.args[0]
+        assert all(hasattr(msg, "content") for msg in normalized_messages)
+
+    def test_summary_message_dict_is_coerced_to_human_message(self) -> None:
+        """Summary events should always store a HumanMessage."""
+        from langchain_core.messages import HumanMessage
+
+        coerced = _coerce_summary_message(
+            {
+                "content": "summary",
+                "additional_kwargs": {"lc_source": "summarization"},
+            }
+        )
+
+        assert isinstance(coerced, HumanMessage)
+        assert coerced.content == "summary"

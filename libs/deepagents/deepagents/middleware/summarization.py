@@ -67,8 +67,16 @@ from langchain.agents.middleware.summarization import (
 from langchain.agents.middleware.types import AgentMiddleware, AgentState, ExtendedModelResponse, PrivateStateAttr
 from langchain.tools import ToolRuntime
 from langchain_core.exceptions import ContextOverflowError
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage, get_buffer_string
-from langchain_core.messages.utils import count_tokens_approximately
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+    get_buffer_string,
+)
+from langchain_core.messages.utils import convert_to_messages, count_tokens_approximately
 from langgraph.config import get_config
 from langgraph.types import Command
 from pydantic import BaseModel
@@ -523,6 +531,28 @@ A condensed summary follows:
         except (KeyError, TypeError) as exc:
             logger.warning("Malformed _summarization_event (missing keys): %s", exc)
             return list(messages)
+
+        # Normalize summary_msg if it's a dict (e.g. loaded from JSON state)
+        if isinstance(summary_msg, dict):
+            # Map standard LC types to roles so convert_to_messages succeeds in environments
+            # where the flat-dict-with-type format is not natively supported.
+            if "type" in summary_msg and "role" not in summary_msg:
+                role_map = {
+                    "human": "user",
+                    "ai": "assistant",
+                    "system": "system",
+                    "tool": "tool",
+                }
+                summary_msg = summary_msg.copy()
+                summary_msg["role"] = role_map.get(summary_msg["type"], summary_msg["type"])
+
+            # Ensure we have a BaseMessage object
+            try:
+                converted = convert_to_messages([summary_msg])
+                if converted:
+                    summary_msg = converted[0]
+            except Exception as exc:
+                logger.warning("Failed to normalize summary_message in event: %s", exc)
 
         if cutoff_idx > len(messages):
             logger.warning(
