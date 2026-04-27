@@ -430,9 +430,10 @@ wheels = [
 
 [[package]]
 name = "deepagents"
-version = "0.5.3"
+version = "0.5.4"
 source = { editable = "../deepagents" }
 dependencies = [
+    { name = "deepagents-acp" },
     { name = "langchain" },
     { name = "langchain-anthropic" },
     { name = "langchain-core" },
@@ -443,6 +444,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "deepagents-acp", specifier = ">=0.0.6" },
     { name = "langchain", specifier = ">=1.2.15,<2.0.0" },
     { name = "langchain-anthropic", specifier = ">=1.4.0,<2.0.0" },
     { name = "langchain-core", specifier = ">=1.2.27,<2.0.0" },
