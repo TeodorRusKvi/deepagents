@@ -26,6 +26,7 @@ dependencies = [
     "langchain-anthropic>=1.4.0,<2.0.0",
     "langchain-google-genai>=4.2.1,<5.0.0",
     "wcmatch",
+    "deepagents-acp>=0.0.6",
 ]
 
 

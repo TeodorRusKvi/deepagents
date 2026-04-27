@@ -446,7 +446,7 @@ def _build_task_tool(  # noqa: C901
             raise ValueError(value_error_msg)
         subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, runtime)
         with _subagent_tracing_context():
-            result = subagent.invoke(subagent_state)
+            result = subagent.invoke(subagent_state, config=runtime.config)
         return _return_command_with_state_update(result, runtime.tool_call_id)
 
     async def atask(
@@ -462,7 +462,7 @@ def _build_task_tool(  # noqa: C901
             raise ValueError(value_error_msg)
         subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, runtime)
         with _subagent_tracing_context():
-            result = await subagent.ainvoke(subagent_state)
+            result = await subagent.ainvoke(subagent_state, config=runtime.config)
         return _return_command_with_state_update(result, runtime.tool_call_id)
 
     return StructuredTool.from_function(
@@ -530,6 +530,7 @@ class SubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         subagents: Sequence[SubAgent | CompiledSubAgent],
         system_prompt: str | None = TASK_SYSTEM_PROMPT,
         task_description: str | None = None,
+        context_schema: type[ContextT] | None = None,
     ) -> None:
         """Initialize the `SubAgentMiddleware`."""
         super().__init__()
@@ -539,6 +540,7 @@ class SubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
             raise ValueError(msg)
         self._backend = backend
         self._subagents = subagents
+        self._context_schema = context_schema
         subagent_specs = self._get_subagents()
 
         task_tool = _build_task_tool(subagent_specs, task_description)
@@ -598,6 +600,7 @@ class SubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                         middleware=middleware,
                         name=spec["name"],
                         response_format=spec.get("response_format"),
+                        context_schema=self._context_schema,
                     ),
                 }
             )

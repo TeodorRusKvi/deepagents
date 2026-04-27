@@ -568,6 +568,7 @@ def create_deep_agent(  # noqa: C901, PLR0912, PLR0915  # Complex graph assembly
                 # see which subagents exist. None (default) uses the built-in
                 # template. Stale keys silently no-op if the tool is renamed.
                 task_description=_profile.tool_description_overrides.get("task"),
+                context_schema=context_schema,
             ),
             create_summarization_middleware(model, backend),
             PatchToolCallsMiddleware(),
