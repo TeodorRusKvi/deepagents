@@ -970,6 +970,7 @@ name = "deepagents"
 version = "0.5.3"
 source = { editable = "../deepagents" }
 dependencies = [
+    { name = "deepagents-acp" },
     { name = "langchain" },
     { name = "langchain-anthropic" },
     { name = "langchain-core" },
@@ -980,6 +981,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "deepagents-acp", specifier = ">=0.0.6" },
     { name = "langchain", specifier = ">=1.2.15,<2.0.0" },
     { name = "langchain-anthropic", specifier = ">=1.4.0,<2.0.0" },
     { name = "langchain-core", specifier = ">=1.2.27,<2.0.0" },
@@ -1009,21 +1011,21 @@ test = [
 
 [[package]]
 name = "deepagents-acp"
-version = "0.0.4"
+version = "0.0.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-client-protocol" },
     { name = "deepagents" },
     { name = "python-dotenv" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6a/1e/a545ca48441973f91d2b14a8c55160f5070ed1ec6092e080ec8d2f303f7c/deepagents_acp-0.0.4.tar.gz", hash = "sha256:db7250af6a257be19960fd88ddbfa4667500741efac16f5da8ab3e33f8ceda63", size = 13084672, upload-time = "2026-02-13T03:45:34.092Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e1/61/287e0b55650d6c7795419414cbf07ea7fa8a7c0fdfcfee4639e8d792cd30/deepagents_acp-0.0.6.tar.gz", hash = "sha256:42f7c324281893563496741579db0818ec8bfd7bfc2e03d0f18cacd5a7b27dbb", size = 13009937, upload-time = "2026-04-18T01:06:30.721Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0d/c8/08ad801c9528474ccf9be6084ebf4f23c75e0661c7b10806e5d3ae4e64f8/deepagents_acp-0.0.4-py3-none-any.whl", hash = "sha256:3d2bb80a9dd6c229724699f48b8d73385bd8f9691d82b7aef095c977de1db1a6", size = 13423, upload-time = "2026-02-13T03:45:32.188Z" },
+    { url = "https://files.pythonhosted.org/packages/85/b3/9882519785e3783db9b0e2fbc488b39d561b47a64a11bab55d537cfd24bb/deepagents_acp-0.0.6-py3-none-any.whl", hash = "sha256:b359cbaade27dd555dd7c70f959a8766ea215f41082bd19bfc39fdda558c0ed3", size = 17512, upload-time = "2026-04-18T01:06:29.142Z" },
 ]
 
 [[package]]
 name = "deepagents-cli"
-version = "0.0.39"
+version = "0.0.40"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
