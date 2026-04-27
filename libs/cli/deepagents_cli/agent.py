@@ -430,6 +430,7 @@ def build_model_identity_section(
     name: str | None,
     provider: str | None = None,
     context_limit: int | None = None,
+    unsupported_modalities: frozenset[str] = frozenset(),
 ) -> str:
     """Build the `### Model Identity` section for the system prompt.
 
@@ -437,6 +438,8 @@ def build_model_identity_section(
         name: Model identifier (e.g. `claude-opus-4-6`).
         provider: Provider identifier (e.g. `anthropic`).
         context_limit: Max input tokens from the model profile.
+        unsupported_modalities: Input modalities not indicated as supported by
+            the model profile (e.g. `{"audio", "video"}`).
 
     Returns:
         The section text including the heading and trailing newline,
@@ -450,6 +453,18 @@ def build_model_identity_section(
     section += ".\n"
     if context_limit:
         section += f"Your context window is {context_limit:,} tokens.\n"
+    if unsupported_modalities:
+        items = sorted(unsupported_modalities)
+        if len(items) == 1:
+            joined = items[0]
+        elif len(items) == 2:  # noqa: PLR2004
+            joined = f"{items[0]} and {items[1]}"
+        else:
+            joined = ", ".join(items[:-1]) + f", and {items[-1]}"
+        section += (
+            f"{joined.capitalize()} input may not be available for this model. "
+            "Do not attempt to read or process these content types.\n"
+        )
     section += "\n"
     return section
 
@@ -465,7 +480,8 @@ def get_system_prompt(
 
     Loads the base system prompt template from `system_prompt.md` and
     interpolates dynamic sections (model identity, working directory,
-    skills path, execution mode).
+    skills path, execution mode, and todo-list guidance for
+    interactive vs headless).
 
     Args:
         assistant_id: The agent identifier for path references
@@ -505,6 +521,15 @@ def get_system_prompt(
             "- If the request is ambiguous, ask questions before acting.\n"
             "- If asked how to approach something, explain first, then act."
         )
+        todo_guidance = (
+            "6. When first creating a todo list for a task, ALWAYS ask the user if "
+            "the plan looks good before starting work\n"
+            '   - Create the todos, then ask: "Does this plan '
+            'look good?" or similar\n'
+            "   - Wait for the user's response before marking the first todo as "
+            "in_progress\n"
+            "7. Update todo status promptly as you complete each item"
+        )
     else:
         mode_description = (
             "non-interactive (headless) mode — there is no human operator "
@@ -527,11 +552,21 @@ def get_system_prompt(
             "`yes |` or `--no-input`/`--non-interactive` flags where "
             "available. Never run commands that block waiting for stdin."
         )
+        todo_guidance = (
+            "6. There is no human operator in this mode — do NOT ask the user to "
+            "approve your plan or wait for a reply.\n"
+            "   After you create todos for a multi-step task, mark the first item "
+            "`in_progress` immediately and start work.\n"
+            "   If the plan needs adjustment, revise the todo list yourself; do "
+            "not block on human confirmation.\n"
+            "7. Update todo status promptly as you complete each item"
+        )
 
     model_identity_section = build_model_identity_section(
         settings.model_name,
         provider=settings.model_provider,
         context_limit=settings.model_context_limit,
+        unsupported_modalities=settings.model_unsupported_modalities,
     )
 
     # Build working directory section (local vs sandbox)
@@ -582,6 +617,7 @@ def get_system_prompt(
         template.replace("{mode_description}", mode_description)
         .replace("{interactive_preamble}", interactive_preamble)
         .replace("{ambiguity_guidance}", ambiguity_guidance)
+        .replace("{todo_guidance}", todo_guidance)
         .replace("{model_identity_section}", model_identity_section)
         .replace("{working_dir_section}", working_dir_section)
         .replace("{skills_path}", skills_path)
@@ -1004,6 +1040,13 @@ def create_cli_agent(
     # Build middleware stack based on enabled features
     agent_middleware = []
     agent_middleware.append(ConfigurableModelMiddleware())
+
+    # Token state: adds _context_tokens to graph state (checkpointed, not
+    # passed to model).  Must be registered before any middleware that might
+    # read the channel.
+    from deepagents_cli.token_state import TokenStateMiddleware
+
+    agent_middleware.append(TokenStateMiddleware())
 
     # Add ask_user middleware (must be early so its tool is available)
     if enable_ask_user:

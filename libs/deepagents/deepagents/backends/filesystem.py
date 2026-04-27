@@ -13,6 +13,10 @@ from pathlib import Path
 import wcmatch.glob as wcglob
 
 from deepagents.backends.protocol import (
+    FILE_NOT_FOUND,
+    INVALID_PATH,
+    IS_DIRECTORY,
+    PERMISSION_DENIED,
     BackendProtocol,
     EditResult,
     FileData,
@@ -343,7 +347,7 @@ class FilesystemBackend(BackendProtocol):
 
             selected_lines = lines[start_idx:end_idx]
             return ReadResult(file_data=FileData(content="\n".join(selected_lines), encoding="utf-8"))
-        except OSError as e:
+        except (OSError, UnicodeDecodeError) as e:
             return ReadResult(error=f"Error reading file '{file_path}': {e}")
 
     def write(
@@ -359,7 +363,7 @@ class FilesystemBackend(BackendProtocol):
 
         Returns:
             `WriteResult` with path on success, or error message if the file
-                already exists or write fails. External storage sets `files_update=None`.
+                already exists or write fails.
         """
         resolved_path = self._resolve_path(file_path)
 
@@ -375,10 +379,12 @@ class FilesystemBackend(BackendProtocol):
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
             fd = os.open(resolved_path, flags, 0o644)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
+            # newline="" disables Windows CRLF translation so callers that
+            # pass LF-only content get LF-only bytes on disk.
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
                 f.write(content)
 
-            return WriteResult(path=file_path, files_update=None)
+            return WriteResult(path=file_path)
         except (OSError, UnicodeEncodeError) as e:
             return WriteResult(error=f"Error writing file '{file_path}': {e}")
 
@@ -400,8 +406,7 @@ class FilesystemBackend(BackendProtocol):
 
         Returns:
             `EditResult` with path and occurrence count on success, or error
-                message if file not found or replacement fails. External storage sets
-                `files_update=None`.
+                message if file not found or replacement fails.
         """
         resolved_path = self._resolve_path(file_path)
 
@@ -435,10 +440,10 @@ class FilesystemBackend(BackendProtocol):
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
             fd = os.open(resolved_path, flags)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
                 f.write(new_content)
 
-            return EditResult(path=file_path, files_update=None, occurrences=int(occurrences))
+            return EditResult(path=file_path, occurrences=int(occurrences))
         except (OSError, UnicodeDecodeError, UnicodeEncodeError) as e:
             return EditResult(error=f"Error editing file '{file_path}': {e}")
 
@@ -506,7 +511,7 @@ class FilesystemBackend(BackendProtocol):
                 timeout=30,
                 check=False,
             )
-        except (subprocess.TimeoutExpired, FileNotFoundError):
+        except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError):
             return None
 
         results: dict[str, list[tuple[int, str]]] = {}
@@ -721,6 +726,9 @@ class FilesystemBackend(BackendProtocol):
         for path in paths:
             try:
                 resolved_path = self._resolve_path(path)
+                if resolved_path.is_dir():
+                    responses.append(FileDownloadResponse(path=path, content=None, error=IS_DIRECTORY))
+                    continue
                 # Use flags to optionally prevent symlink following if
                 # supported by the OS
                 fd = os.open(resolved_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -749,13 +757,13 @@ def _map_exception_to_standard_error(exc: Exception) -> FileOperationError | Non
         A `FileOperationError` literal, or `None` if unrecognized.
     """
     if isinstance(exc, FileNotFoundError):
-        return "file_not_found"
+        return FILE_NOT_FOUND
     if isinstance(exc, PermissionError):
-        return "permission_denied"
+        return PERMISSION_DENIED
     if isinstance(exc, IsADirectoryError):
-        return "is_directory"
+        return IS_DIRECTORY
     if isinstance(exc, (NotADirectoryError, FileExistsError)):
-        return "invalid_path"
+        return INVALID_PATH
     if isinstance(exc, ValueError):
-        return "invalid_path"
+        return INVALID_PATH
     return None

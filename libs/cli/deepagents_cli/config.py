@@ -32,8 +32,8 @@ _bootstrap_done = False
 """Whether `_ensure_bootstrap()` has executed."""
 
 _bootstrap_lock = threading.Lock()
-"""Guards `_ensure_bootstrap()` against concurrent access from the main
-thread and the prewarm worker thread."""
+"""Guards `_ensure_bootstrap()` against concurrent access from the main thread
+and the prewarm worker thread."""
 
 _singleton_lock = threading.Lock()
 """Guards lazy singleton construction in `_get_console` / `_get_settings`."""
@@ -213,14 +213,14 @@ def _ensure_bootstrap() -> None:
                     # Propagate (including empty string for explicit disable).
                     os.environ[canonical] = prefixed_val
                 elif os.environ[canonical] != prefixed_val:
+                    os.environ[canonical] = prefixed_val
                     logger.warning(
                         "Both %s and %s are set with different values; "
-                        "the LangSmith SDK will use %s while the CLI "
-                        "prefers %s. Unset one to avoid confusion.",
+                        "using %s. Unset %s to silence this warning.",
                         canonical,
                         prefixed,
-                        canonical,
                         prefixed,
+                        canonical,
                     )
         except Exception:
             logger.exception(
@@ -886,6 +886,9 @@ class Settings:
 
     model_context_limit: int | None = None
     """Maximum input token count from the model profile."""
+
+    model_unsupported_modalities: frozenset[str] = frozenset()
+    """Input modalities not indicated as supported by the model profile."""
 
     project_root: Path | None = None
     """Current project root directory, or `None` if not in a git project."""
@@ -1864,9 +1867,10 @@ _OPENROUTER_APP_CATEGORIES: list[str] = ["cli-agent"]
 def _apply_openrouter_defaults(kwargs: dict[str, Any]) -> None:
     """Inject default OpenRouter attribution kwargs.
 
-    Sets `app_url` and `app_title` via `setdefault` so that user-supplied
-    values in config take precedence. These map to the `HTTP-Referer` and
-    `X-Title` headers that `ChatOpenRouter` sends for app attribution
+    Sets `app_url`, `app_title`, and `app_categories` via `setdefault` so
+    that user-supplied values in config take precedence. These map to the
+    `HTTP-Referer`, `X-Title`, and `X-OpenRouter-Categories` headers that
+    `ChatOpenRouter` sends for app attribution
     (see https://openrouter.ai/docs/app-attribution).
 
     Users can override either value provider-wide or per-model in
@@ -1933,7 +1937,9 @@ def _get_provider_kwargs(
             result["api_key"] = api_key
 
     if provider == "openrouter":
-        from deepagents._models import check_openrouter_version  # noqa: PLC2701
+        from deepagents.profiles._openrouter import (
+            check_openrouter_version,  # noqa: PLC2701
+        )
 
         check_openrouter_version()
         _apply_openrouter_defaults(result)
@@ -2082,12 +2088,15 @@ class ModelResult:
         model_name: Resolved model name.
         provider: Resolved provider name.
         context_limit: Max input tokens from the model profile, or `None`.
+        unsupported_modalities: Input modalities not indicated as supported by
+            the model profile (e.g. `{"audio", "video"}`).
     """
 
     model: BaseChatModel
     model_name: str
     provider: str
     context_limit: int | None = None
+    unsupported_modalities: frozenset[str] = frozenset()
 
     def apply_to_settings(self) -> None:
         """Commit this result's metadata to global `settings`."""
@@ -2095,6 +2104,7 @@ class ModelResult:
         s.model_name = self.model_name
         s.model_provider = self.provider
         s.model_context_limit = self.context_limit
+        s.model_unsupported_modalities = self.unsupported_modalities
 
 
 def _apply_profile_overrides(
@@ -2187,7 +2197,14 @@ def create_model(
         >>> model = create_model("gpt-4o")  # Auto-detects openai
         >>> model = create_model()  # Uses environment defaults
     """
-    from deepagents_cli.model_config import ModelConfig, ModelConfigError, ModelSpec
+    from deepagents_cli.model_config import (
+        IMPLICIT_AUTH_PROVIDERS,
+        ModelConfig,
+        ModelConfigError,
+        ModelSpec,
+        get_credential_env_var,
+        has_provider_credentials,
+    )
 
     if not model_spec:
         model_spec = _get_default_model_spec()
@@ -2216,6 +2233,20 @@ def create_model(
         # Bare model name — auto-detect provider or let init_chat_model infer
         model_name = model_spec
         provider = detect_provider(model_spec) or ""
+
+    # Early credential check — fail fast with an actionable message instead of
+    # letting the provider SDK raise an opaque auth error on first invocation.
+    # Providers that support implicit auth (e.g., Vertex AI ADC) are excluded
+    # because their env-var mapping is not a reliable indicator.
+    if provider and provider not in IMPLICIT_AUTH_PROVIDERS:
+        cred_status = has_provider_credentials(provider)
+        if cred_status is False:
+            env_var = get_credential_env_var(provider) or f"<{provider} API key>"
+            msg = (
+                f"No credentials found for provider '{provider}'. "
+                f"Please set the {env_var} environment variable."
+            )
+            raise ModelConfigError(msg)
 
     # Provider-specific kwargs (with per-model overrides)
     kwargs = _get_provider_kwargs(provider, model_name=model_name)
@@ -2258,17 +2289,30 @@ def create_model(
             raise_on_failure=True,
         )
 
-    # Extract context limit from model profile (if available)
+    # Extract context limit and modality support from model profile
     context_limit: int | None = None
+    unsupported_modalities: frozenset[str] = frozenset()
     profile = getattr(model, "profile", None)
-    if isinstance(profile, dict) and isinstance(profile.get("max_input_tokens"), int):
-        context_limit = profile["max_input_tokens"]
+    if isinstance(profile, dict):
+        if isinstance(profile.get("max_input_tokens"), int):
+            context_limit = profile["max_input_tokens"]
+
+        modality_keys = {
+            "image_inputs": "image",
+            "audio_inputs": "audio",
+            "video_inputs": "video",
+            "pdf_inputs": "pdf",
+        }
+        unsupported_modalities = frozenset(
+            label for key, label in modality_keys.items() if profile.get(key) is False
+        )
 
     return ModelResult(
         model=model,
         model_name=model_name,
         provider=resolved_provider,
         context_limit=context_limit,
+        unsupported_modalities=unsupported_modalities,
     )
 
 
@@ -2285,8 +2329,8 @@ def validate_model_capabilities(model: BaseChatModel, model_name: str) -> None:
 
     Note:
         This validation is best-effort. Models without profiles will pass with
-        a warning. Exits via sys.exit(1) if model profile explicitly indicates
-        tool_calling=False.
+        a warning. Calls `sys.exit(1)` if the model's profile explicitly
+        indicates `tool_calling=False`.
     """
     console = _get_console()
     profile = getattr(model, "profile", None)

@@ -67,12 +67,19 @@ def check_cli_dependencies() -> None:
 
 
 _RIPGREP_URL = "https://github.com/BurntSushi/ripgrep#installation"
+"""Fallback installation URL when no platform package manager is detected."""
 
-_RIPGREP_SUPPRESS_HINT = (
-    "To suppress, add to ~/.deepagents/config.toml:\n"
-    "\\[warnings]\n"
-    'suppress = \\["ripgrep"]'
+_SUPPRESS_HINT_TUI = "Use /notifications to manage warnings."
+"""Suppression hint for TUI toasts, referencing the in-app settings screen."""
+
+_SUPPRESS_HINT_CLI = (
+    'To suppress, edit ~/.deepagents/config.toml:\n\\[warnings]\nsuppress = \\["<key>"]'
 )
+"""Suppression hint for non-interactive CLI output.
+
+Contains a `<key>` placeholder that callers replace with the warning key
+(e.g. `"ripgrep"`, `"tavily"`).
+"""
 
 
 def _ripgrep_install_hint() -> str:
@@ -133,6 +140,12 @@ def check_optional_tools(*, config_path: Path | None = None) -> list[str]:
     missing: list[str] = []
     if shutil.which("rg") is None and not is_warning_suppressed("ripgrep", config_path):
         missing.append("ripgrep")
+
+    from deepagents_cli.config import settings
+
+    if not settings.has_tavily and not is_warning_suppressed("tavily", config_path):
+        missing.append("tavily")
+
     return missing
 
 
@@ -150,7 +163,13 @@ def format_tool_warning_tui(tool: str) -> str:
         return (
             "ripgrep is not installed; the grep tool will use a slower fallback.\n"
             f"\nInstall: {hint}\n\n"
-            f"{_RIPGREP_SUPPRESS_HINT}"
+            f"{_SUPPRESS_HINT_TUI}"
+        )
+    if tool == "tavily":
+        return (
+            "Web search is disabled \u2014 TAVILY_API_KEY is not set.\n"
+            "\nGet a key at https://tavily.com\n\n"
+            f"{_SUPPRESS_HINT_TUI}"
         )
     return f"{tool} is not installed."
 
@@ -168,10 +187,19 @@ def format_tool_warning_cli(tool: str) -> str:
         hint = _ripgrep_install_hint()
         if hint.startswith("http"):
             hint = f"[link={hint}]{hint}[/link]"
+        suppress = _SUPPRESS_HINT_CLI.replace("<key>", "ripgrep")
         return (
             "ripgrep is not installed; the grep tool will use a slower fallback.\n"
             f"Install: {hint}\n\n"
-            f"{_RIPGREP_SUPPRESS_HINT}\n"
+            f"{suppress}\n"
+        )
+    if tool == "tavily":
+        url = "https://tavily.com"
+        suppress = _SUPPRESS_HINT_CLI.replace("<key>", "tavily")
+        return (
+            "Web search is disabled \u2014 TAVILY_API_KEY is not set.\n"
+            f"Get a key at [link={url}]{url}[/link]\n\n"
+            f"{suppress}\n"
         )
     return f"{tool} is not installed."
 
@@ -234,6 +262,7 @@ def parse_args() -> argparse.Namespace:
     Returns:
         Parsed arguments namespace.
     """
+    from deepagents_cli.deploy import setup_deploy_parsers
     from deepagents_cli.output import add_json_output_arg
     from deepagents_cli.skills import setup_skills_parser
 
@@ -356,6 +385,11 @@ def parse_args() -> argparse.Namespace:
         subparsers,
         make_help_action=_make_help_action,
         add_output_args=add_json_output_arg,
+    )
+
+    setup_deploy_parsers(
+        subparsers,
+        make_help_action=_make_help_action,
     )
 
     threads_parser = subparsers.add_parser(
@@ -505,6 +539,13 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--skill",
+        dest="initial_skill",
+        metavar="NAME",
+        help="Invoke a skill when the interactive session starts",
+    )
+
+    parser.add_argument(
         "-n",
         "--non-interactive",
         dest="non_interactive_message",
@@ -616,6 +657,11 @@ def parse_args() -> argparse.Namespace:
         help="Check for and install updates, then exit",
     )
     parser.add_argument(
+        "--auto-update",
+        action="store_true",
+        help="Toggle automatic updates on or off, then exit",
+    )
+    parser.add_argument(
         "--acp",
         action="store_true",
         help="Run as an ACP server over stdio instead of launching the Textual UI",
@@ -649,6 +695,7 @@ async def run_textual_cli_async(
     thread_id: str | None = None,
     resume_thread: str | None = None,
     initial_prompt: str | None = None,
+    initial_skill: str | None = None,
     mcp_config_path: str | None = None,
     no_mcp: bool = False,
     trust_project_mcp: bool | None = None,
@@ -684,6 +731,7 @@ async def run_textual_cli_async(
 
             Resolved asynchronously inside the TUI.
         initial_prompt: Optional prompt to auto-submit when session starts
+        initial_skill: Optional skill name to invoke when the session starts.
         mcp_config_path: Optional path to MCP servers JSON configuration file.
 
             Merged on top of auto-discovered configs (highest precedence).
@@ -769,6 +817,7 @@ async def run_textual_cli_async(
             thread_id=thread_id,
             resume_thread=resume_thread,
             initial_prompt=initial_prompt,
+            initial_skill=initial_skill,
             profile_override=profile_override,
             server_kwargs=server_kwargs,
             mcp_preload_kwargs=mcp_preload_kwargs,
@@ -819,7 +868,7 @@ async def _run_acp_cli_async(
     from deepagents_cli.agent import create_cli_agent, load_async_subagents
     from deepagents_cli.config import create_model, settings
     from deepagents_cli.model_config import ModelConfigError, save_recent_model
-    from deepagents_cli.tools import fetch_url, http_request, web_search
+    from deepagents_cli.tools import fetch_url, web_search
 
     try:
         model_result = create_model(
@@ -836,7 +885,7 @@ async def _run_acp_cli_async(
     # Persist the resolved model so [models].recent is always populated.
     save_recent_model(f"{model_result.provider}:{model_result.model_name}")
 
-    tools: list[Any] = [http_request, fetch_url]
+    tools: list[Any] = [fetch_url]
     if settings.has_tavily:
         tools.append(web_search)
 
@@ -929,6 +978,15 @@ def apply_stdin_pipe(args: argparse.Namespace) -> None:
         # initial_prompt = "{contents of error.log}\n\nexplain this"
         ```
 
+    - If `initial_skill` is already set (`--skill`, but not `-n`), stores the
+        piped text in `initial_prompt` so the skill receives it as the
+        startup request:
+
+        ```bash
+        cat diff.txt | deepagents --skill code-review
+        # initial_prompt = "{contents of diff.txt}"
+        ```
+
     - Otherwise, sets `non_interactive_message` to the piped text, causing
         the CLI to run non-interactively with it as the prompt:
 
@@ -1004,10 +1062,21 @@ def apply_stdin_pipe(args: argparse.Namespace) -> None:
     if not stdin_text:
         return
 
+    # Priority: -n message > -m prompt > --skill (no -m) > fallback to -n.
+    # The initial_prompt branch uses `is not None` (not truthiness) so that
+    # `-m ""` is distinguished from "no -m at all", allowing stdin to land
+    # in initial_prompt even when the explicit value is empty.  The --skill
+    # branch only fires when -m was NOT provided; when both -m and --skill
+    # are set, stdin merges with the -m value (previous branch).
     if args.non_interactive_message:
         args.non_interactive_message = f"{stdin_text}\n\n{args.non_interactive_message}"
-    elif args.initial_prompt:
-        args.initial_prompt = f"{stdin_text}\n\n{args.initial_prompt}"
+    elif args.initial_prompt is not None:
+        if args.initial_prompt:
+            args.initial_prompt = f"{stdin_text}\n\n{args.initial_prompt}"
+        else:
+            args.initial_prompt = stdin_text
+    elif getattr(args, "initial_skill", None):
+        args.initial_prompt = stdin_text
     else:
         args.non_interactive_message = stdin_text
 
@@ -1278,6 +1347,22 @@ def cli_main() -> None:
             )
             sys.exit(2)
 
+        if (
+            getattr(args, "initial_skill", None)
+            and not args.non_interactive_message
+            and (args.quiet or args.no_stream)
+        ):
+            from rich.console import Console as _Console
+
+            _Console(stderr=True).print(
+                "[bold red]Error:[/bold red] --skill requires "
+                "--non-interactive (-n) when combined with --quiet or "
+                "--no-stream.\n"
+                "  deepagents --skill code-review -m 'review this patch'\n"
+                "  deepagents --skill code-review -n 'review this patch'"
+            )
+            sys.exit(2)
+
         if (args.quiet or args.no_stream) and not args.non_interactive_message:
             # Print to stderr (not the module-level stdout console) and exit
             # with code 2 to match the POSIX convention for usage errors, as
@@ -1347,6 +1432,43 @@ def cli_main() -> None:
                     "deepagents-cli[/cyan]"
                 )
                 sys.exit(1)
+
+        # Handle --auto-update flag (headless toggle: reads current state
+        # and inverts it, no session)
+        if args.auto_update:
+            try:
+                from deepagents_cli.config import _is_editable_install
+                from deepagents_cli.update_check import (
+                    is_auto_update_enabled,
+                    set_auto_update,
+                )
+
+                if _is_editable_install():
+                    console.print(
+                        "[bold yellow]Warning:[/bold yellow] "
+                        "Auto-updates are not available for editable installs."
+                    )
+                    sys.exit(1)
+
+                currently_enabled = is_auto_update_enabled()
+                new_state = not currently_enabled
+                set_auto_update(new_state)
+                label = "enabled" if new_state else "disabled"
+                console.print(f"Auto-updates {label}.")
+            except OSError:
+                logger.warning("--auto-update failed: filesystem error", exc_info=True)
+                console.print(
+                    "[bold red]Error:[/bold red] Failed to toggle auto-updates. "
+                    "Check permissions for ~/.deepagents/"
+                )
+                sys.exit(1)
+            except Exception:
+                logger.warning("--auto-update failed", exc_info=True)
+                console.print(
+                    "[bold red]Error:[/bold red] Failed to toggle auto-updates."
+                )
+                sys.exit(1)
+            sys.exit(0)
 
         # Handle --default-model / --clear-default-model (headless, no session)
         if args.clear_default_model:
@@ -1423,6 +1545,18 @@ def cli_main() -> None:
             from deepagents_cli.skills import execute_skills_command
 
             execute_skills_command(args)
+        elif args.command == "init":
+            from deepagents_cli.deploy import execute_init_command
+
+            execute_init_command(args)
+        elif args.command == "dev":
+            from deepagents_cli.deploy import execute_dev_command
+
+            execute_dev_command(args)
+        elif args.command == "deploy":
+            from deepagents_cli.deploy import execute_deploy_command
+
+            execute_deploy_command(args)
         elif args.command == "threads":
             from deepagents_cli.sessions import (
                 delete_thread_command,
@@ -1501,6 +1635,7 @@ def cli_main() -> None:
                     sandbox_type=args.sandbox,
                     sandbox_id=args.sandbox_id,
                     sandbox_setup=getattr(args, "sandbox_setup", None),
+                    initial_skill=getattr(args, "initial_skill", None),
                     quiet=args.quiet,
                     stream=not args.no_stream,
                     mcp_config_path=getattr(args, "mcp_config", None),
@@ -1563,6 +1698,7 @@ def cli_main() -> None:
                         thread_id=thread_id,
                         resume_thread=resume_thread,
                         initial_prompt=getattr(args, "initial_prompt", None),
+                        initial_skill=getattr(args, "initial_skill", None),
                         mcp_config_path=getattr(args, "mcp_config", None),
                         no_mcp=getattr(args, "no_mcp", False),
                         trust_project_mcp=mcp_trust_decision,
@@ -1610,25 +1746,31 @@ def cli_main() -> None:
             # Warn about available update on exit
             try:
                 if result.update_available[0]:
+                    from deepagents_cli._version import __version__ as cli_version
                     from deepagents_cli.update_check import (
                         is_auto_update_enabled,
+                        mark_update_notified,
+                        should_notify_update,
                         upgrade_command,
                     )
 
                     latest = result.update_available[1]
-                    console.print()
-                    update_msg = Text("Update available: ", style="yellow bold")
-                    update_msg.append(f"v{latest}", style="yellow")
-                    console.print(update_msg)
-                    cmd_hint = Text("Run: ", style="dim")
-                    cmd_hint.append(upgrade_command(), style="cyan")
-                    console.print(cmd_hint)
-                    if not is_auto_update_enabled():
-                        auto_hint = Text("Enable auto-updates: ", style="dim")
-                        auto_hint.append("/auto-update", style="cyan")
-                        console.print(auto_hint)
+                    if latest and should_notify_update(latest):
+                        console.print()
+                        update_msg = Text("Update available: ", style="yellow bold")
+                        update_msg.append(f"v{latest}", style="yellow")
+                        update_msg.append(f" (current: v{cli_version})", style="dim")
+                        console.print(update_msg)
+                        cmd_hint = Text("Run: ", style="dim")
+                        cmd_hint.append(upgrade_command(), style="cyan")
+                        console.print(cmd_hint)
+                        if not is_auto_update_enabled():
+                            auto_hint = Text("Enable auto-updates: ", style="dim")
+                            auto_hint.append("deepagents --auto-update", style="cyan")
+                            console.print(auto_hint)
+                        mark_update_notified(latest)
             except Exception:
-                logger.debug("Failed to display exit update banner", exc_info=True)
+                logger.warning("Failed to display exit update banner", exc_info=True)
     except KeyboardInterrupt:
         # Clean exit on Ctrl+C — suppress ugly traceback.
         # `console` may not be bound if Ctrl+C arrives during config import.

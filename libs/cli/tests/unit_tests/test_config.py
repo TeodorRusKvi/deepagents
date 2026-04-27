@@ -438,6 +438,12 @@ class TestCreateModelProfileExtraction:
     now uses it internally.
     """
 
+    @pytest.fixture(autouse=True)
+    def _bypass_credential_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "deepagents_cli.model_config.has_provider_credentials", lambda _: True
+        )
+
     @patch("langchain.chat_models.init_chat_model")
     def test_extracts_context_limit_from_profile(
         self, mock_init_chat_model: Mock
@@ -503,9 +509,111 @@ class TestCreateModelProfileExtraction:
         result = create_model("anthropic:claude-sonnet-4-5")
         assert result.context_limit is None
 
+    @patch("langchain.chat_models.init_chat_model")
+    def test_extracts_unsupported_modalities(self, mock_init_chat_model: Mock) -> None:
+        """Test that explicitly False modality flags are extracted."""
+        mock_model = Mock()
+        mock_model.profile = {
+            "max_input_tokens": 64000,
+            "tool_calling": True,
+            "image_inputs": False,
+            "audio_inputs": False,
+            "video_inputs": False,
+            "pdf_inputs": False,
+        }
+        mock_init_chat_model.return_value = mock_model
+
+        result = create_model("deepseek:deepseek-r1")
+        assert result.unsupported_modalities == frozenset(
+            {"image", "audio", "video", "pdf"}
+        )
+
+    @patch("langchain.chat_models.init_chat_model")
+    def test_supported_modalities_not_flagged(self, mock_init_chat_model: Mock) -> None:
+        """Test that True modality flags produce empty unsupported set."""
+        mock_model = Mock()
+        mock_model.profile = {
+            "max_input_tokens": 200000,
+            "tool_calling": True,
+            "image_inputs": True,
+            "audio_inputs": True,
+            "video_inputs": True,
+            "pdf_inputs": True,
+        }
+        mock_init_chat_model.return_value = mock_model
+
+        result = create_model("anthropic:claude-sonnet-4-5")
+        assert result.unsupported_modalities == frozenset()
+
+    @patch("langchain.chat_models.init_chat_model")
+    def test_missing_modality_keys_not_flagged(
+        self, mock_init_chat_model: Mock
+    ) -> None:
+        """Test that absent modality keys are not treated as unsupported."""
+        mock_model = Mock()
+        mock_model.profile = {"max_input_tokens": 128000, "tool_calling": True}
+        mock_init_chat_model.return_value = mock_model
+
+        result = create_model("openai:gpt-4o")
+        assert result.unsupported_modalities == frozenset()
+
+    @patch("langchain.chat_models.init_chat_model")
+    def test_mixed_modality_flags(self, mock_init_chat_model: Mock) -> None:
+        """Test partial modality support extraction."""
+        mock_model = Mock()
+        mock_model.profile = {
+            "tool_calling": True,
+            "image_inputs": True,
+            "audio_inputs": False,
+            "video_inputs": True,
+            "pdf_inputs": False,
+        }
+        mock_init_chat_model.return_value = mock_model
+
+        result = create_model("anthropic:claude-sonnet-4-5")
+        assert result.unsupported_modalities == frozenset({"audio", "pdf"})
+
+    @patch("langchain.chat_models.init_chat_model")
+    def test_no_profile_leaves_modalities_empty(
+        self, mock_init_chat_model: Mock
+    ) -> None:
+        """Test that missing profile produces empty unsupported set."""
+        mock_model = Mock(spec=["invoke"])
+        mock_init_chat_model.return_value = mock_model
+
+        result = create_model("anthropic:claude-sonnet-4-5")
+        assert result.unsupported_modalities == frozenset()
+
+
+class TestModelResultApplyToSettings:
+    """Tests for ModelResult.apply_to_settings propagation."""
+
+    def test_propagates_unsupported_modalities(self) -> None:
+        """Test that apply_to_settings writes unsupported_modalities to settings."""
+        model_result = ModelResult(
+            model=Mock(),
+            model_name="deepseek-r1",
+            provider="deepseek",
+            context_limit=64000,
+            unsupported_modalities=frozenset({"image", "audio"}),
+        )
+        original = settings.model_unsupported_modalities
+        try:
+            model_result.apply_to_settings()
+            expected = frozenset({"image", "audio"})
+            assert settings.model_unsupported_modalities == expected
+        finally:
+            settings.model_unsupported_modalities = original
+
 
 class TestCreateModelProfileOverrides:
     """Tests for profile overrides from config.toml in create_model."""
+
+    @pytest.fixture(autouse=True)
+    def _bypass_credential_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "deepagents_cli.model_config.has_provider_credentials", lambda _: True
+        )
 
     @patch("langchain.chat_models.init_chat_model")
     def test_profile_override_sets_context_limit(
@@ -662,6 +770,12 @@ max_input_tokens = 4096
 
 class TestCreateModelCLIProfileOverrides:
     """Tests for CLI --profile-override in create_model."""
+
+    @pytest.fixture(autouse=True)
+    def _bypass_credential_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "deepagents_cli.model_config.has_provider_credentials", lambda _: True
+        )
 
     @patch("langchain.chat_models.init_chat_model")
     def test_cli_profile_override_sets_context_limit(
@@ -1356,7 +1470,7 @@ class TestOpenRouterVersionCheck:
         """_get_provider_kwargs raises ImportError for old langchain-openrouter."""
         with (
             patch(
-                "deepagents._models.pkg_version",
+                "deepagents.profiles._openrouter.pkg_version",
                 return_value="0.0.1",
             ),
             pytest.raises(ImportError, match="langchain-openrouter>="),
@@ -1365,10 +1479,10 @@ class TestOpenRouterVersionCheck:
 
     def test_accepts_sufficient_version(self) -> None:
         """_get_provider_kwargs succeeds when version meets minimum."""
-        from deepagents._models import OPENROUTER_MIN_VERSION
+        from deepagents.profiles._openrouter import OPENROUTER_MIN_VERSION
 
         with patch(
-            "deepagents._models.pkg_version",
+            "deepagents.profiles._openrouter.pkg_version",
             return_value=OPENROUTER_MIN_VERSION,
         ):
             kwargs = _get_provider_kwargs("openrouter")
@@ -1377,7 +1491,7 @@ class TestOpenRouterVersionCheck:
 
     def test_skipped_for_other_providers(self) -> None:
         """Version check is not invoked for non-openrouter providers."""
-        with patch("deepagents._models.check_openrouter_version") as mock:
+        with patch("deepagents.profiles._openrouter.check_openrouter_version") as mock:
             _get_provider_kwargs("openai")
 
         mock.assert_not_called()
@@ -1623,6 +1737,12 @@ api_key_env = "FIREWORKS_API_KEY"
 class TestCreateModelExtraKwargs:
     """Tests for create_model() with extra_kwargs from --model-params."""
 
+    @pytest.fixture(autouse=True)
+    def _bypass_credential_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "deepagents_cli.model_config.has_provider_credentials", lambda _: True
+        )
+
     @patch("langchain.chat_models.init_chat_model")
     def test_extra_kwargs_passed_to_model(self, mock_init_chat_model: Mock) -> None:
         """extra_kwargs are forwarded to init_chat_model."""
@@ -1689,6 +1809,12 @@ max_tokens = 1024
 
 class TestCreateModelEdgeCaseParsing:
     """Tests for create_model() edge-case spec parsing."""
+
+    @pytest.fixture(autouse=True)
+    def _bypass_credential_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "deepagents_cli.model_config.has_provider_credentials", lambda _: True
+        )
 
     @patch("langchain.chat_models.init_chat_model")
     def test_leading_colon_treated_as_bare_model(
@@ -2040,10 +2166,10 @@ class TestLazyModuleAttributes:
             config_mod._bootstrap_done = original_done
             config_mod._original_langsmith_project = original_ls
 
-    def test_bootstrap_does_not_overwrite_canonical_langsmith_vars(
+    def test_bootstrap_overrides_canonical_with_prefixed_value(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Canonical LangSmith vars are preserved when already set."""
+        """Prefixed value wins when both canonical and prefixed vars are set."""
         import deepagents_cli.config as config_mod
         from deepagents_cli.config import _ensure_bootstrap
 
@@ -2067,8 +2193,8 @@ class TestLazyModuleAttributes:
 
             import os
 
-            # Canonical value preserved — propagation does not overwrite.
-            assert os.environ["LANGSMITH_API_KEY"] == "lsv2_original"
+            # Prefixed value wins — canonical is overwritten.
+            assert os.environ["LANGSMITH_API_KEY"] == "lsv2_override"
         finally:
             config_mod._bootstrap_done = original_done
             config_mod._original_langsmith_project = original_ls

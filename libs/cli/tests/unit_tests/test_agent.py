@@ -21,6 +21,7 @@ from deepagents_cli.agent import (
     _format_task_description,
     _format_web_search_description,
     _format_write_file_description,
+    build_model_identity_section,
     create_cli_agent,
     get_system_prompt,
     list_agents,
@@ -347,6 +348,57 @@ def test_format_fetch_url_description_with_hidden_unicode_in_url():
     assert "\u200b" not in description
 
 
+class TestBuildModelIdentitySection:
+    """Direct tests for build_model_identity_section."""
+
+    def test_empty_when_no_name(self) -> None:
+        assert build_model_identity_section(None) == ""
+
+    def test_basic_name_only(self) -> None:
+        result = build_model_identity_section("gpt-4o")
+        assert "You are running as model `gpt-4o`." in result
+        assert "may not be available" not in result
+
+    def test_unsupported_single(self) -> None:
+        result = build_model_identity_section(
+            "test-model", unsupported_modalities=frozenset({"audio"})
+        )
+        assert "Audio input may not be available for this model." in result
+        assert "Do not attempt to read or process" in result
+
+    def test_unsupported_two_uses_and(self) -> None:
+        result = build_model_identity_section(
+            "test-model",
+            unsupported_modalities=frozenset({"video", "audio"}),
+        )
+        assert "Audio and video input may not be available" in result
+
+    def test_unsupported_multiple_uses_oxford_comma(self) -> None:
+        result = build_model_identity_section(
+            "test-model",
+            unsupported_modalities=frozenset({"video", "audio", "image"}),
+        )
+        assert "Audio, image, and video input may not be available" in result
+
+    def test_unsupported_empty_frozenset_no_warning(self) -> None:
+        result = build_model_identity_section(
+            "test-model", unsupported_modalities=frozenset()
+        )
+        assert "may not be available" not in result
+
+    def test_all_fields(self) -> None:
+        result = build_model_identity_section(
+            "deepseek-r1",
+            provider="deepseek",
+            context_limit=64000,
+            unsupported_modalities=frozenset({"image", "pdf"}),
+        )
+        assert "deepseek-r1" in result
+        assert "(provider: deepseek)" in result
+        assert "64,000 tokens" in result
+        assert "Image and pdf input may not be available" in result
+
+
 class TestGetSystemPromptModelIdentity:
     """Tests for model identity section in get_system_prompt."""
 
@@ -355,6 +407,7 @@ class TestGetSystemPromptModelIdentity:
         mock_settings = Mock()
         mock_settings.model_name = "claude-sonnet-4-6"
         mock_settings.model_provider = "anthropic"
+        mock_settings.model_unsupported_modalities = frozenset()
         mock_settings.model_context_limit = 200000
 
         with patch("deepagents_cli.agent.settings", mock_settings):
@@ -370,6 +423,7 @@ class TestGetSystemPromptModelIdentity:
         mock_settings = Mock()
         mock_settings.model_name = None
         mock_settings.model_provider = "anthropic"
+        mock_settings.model_unsupported_modalities = frozenset()
         mock_settings.model_context_limit = 200000
 
         with patch("deepagents_cli.agent.settings", mock_settings):
@@ -382,6 +436,7 @@ class TestGetSystemPromptModelIdentity:
         mock_settings = Mock()
         mock_settings.model_name = "gpt-4"
         mock_settings.model_provider = None
+        mock_settings.model_unsupported_modalities = frozenset()
         mock_settings.model_context_limit = 128000
 
         with patch("deepagents_cli.agent.settings", mock_settings):
@@ -397,6 +452,7 @@ class TestGetSystemPromptModelIdentity:
         mock_settings = Mock()
         mock_settings.model_name = "gemini-3-pro"
         mock_settings.model_provider = "google"
+        mock_settings.model_unsupported_modalities = frozenset()
         mock_settings.model_context_limit = None
 
         with patch("deepagents_cli.agent.settings", mock_settings):
@@ -412,6 +468,7 @@ class TestGetSystemPromptModelIdentity:
         mock_settings = Mock()
         mock_settings.model_name = "test-model"
         mock_settings.model_provider = None
+        mock_settings.model_unsupported_modalities = frozenset()
         mock_settings.model_context_limit = None
 
         with patch("deepagents_cli.agent.settings", mock_settings):
@@ -421,6 +478,47 @@ class TestGetSystemPromptModelIdentity:
         assert "You are running as model `test-model`." in prompt
         assert "(provider:" not in prompt
         assert "context window" not in prompt
+
+    def test_includes_unsupported_modalities_warning(self) -> None:
+        """Test that unsupported modalities are surfaced in the prompt."""
+        mock_settings = Mock()
+        mock_settings.model_name = "deepseek-r1"
+        mock_settings.model_provider = "deepseek"
+        mock_settings.model_unsupported_modalities = frozenset(
+            {"image", "audio", "video", "pdf"}
+        )
+        mock_settings.model_context_limit = 64000
+
+        with patch("deepagents_cli.agent.settings", mock_settings):
+            prompt = get_system_prompt("test-agent")
+
+        assert "Audio, image, pdf, and video input may not be available" in prompt
+
+    def test_single_unsupported_modality(self) -> None:
+        """Test warning with a single unsupported modality."""
+        mock_settings = Mock()
+        mock_settings.model_name = "test-model"
+        mock_settings.model_provider = "test"
+        mock_settings.model_unsupported_modalities = frozenset({"audio"})
+        mock_settings.model_context_limit = None
+
+        with patch("deepagents_cli.agent.settings", mock_settings):
+            prompt = get_system_prompt("test-agent")
+
+        assert "Audio input may not be available" in prompt
+
+    def test_no_modality_warning_when_all_supported(self) -> None:
+        """Test that no modality warning appears when all modalities supported."""
+        mock_settings = Mock()
+        mock_settings.model_name = "claude-opus-4-6"
+        mock_settings.model_provider = "anthropic"
+        mock_settings.model_unsupported_modalities = frozenset()
+        mock_settings.model_context_limit = 200000
+
+        with patch("deepagents_cli.agent.settings", mock_settings):
+            prompt = get_system_prompt("test-agent")
+
+        assert "may not be available" not in prompt
 
 
 class TestGetSystemPromptNonInteractive:
@@ -483,6 +581,29 @@ class TestGetSystemPromptNonInteractive:
             prompt = get_system_prompt("test-agent")
 
         assert "interactive CLI" in prompt
+
+    def test_interactive_todo_section_asks_user_before_starting(self) -> None:
+        """Interactive mode should require plan approval before first in_progress."""
+        mock_settings = Mock()
+        mock_settings.model_name = None
+
+        with patch("deepagents_cli.agent.settings", mock_settings):
+            prompt = get_system_prompt("test-agent", interactive=True)
+
+        assert "Wait for the user's response before marking the first todo" in prompt
+
+    def test_non_interactive_todo_section_does_not_wait_for_user(self) -> None:
+        """Headless mode must not contradict 'no human' guidance in todo rules."""
+        mock_settings = Mock()
+        mock_settings.model_name = None
+
+        with patch("deepagents_cli.agent.settings", mock_settings):
+            prompt = get_system_prompt("test-agent", interactive=False)
+
+        wait_for_user = "Wait for the user's response before marking the first todo"
+        assert wait_for_user not in prompt
+        assert "do NOT ask the user to approve your plan" in prompt
+        assert "mark the first item `in_progress` immediately" in prompt
 
 
 class TestGetSystemPromptCwdOSError:
@@ -597,6 +718,7 @@ class TestCreateCliAgentInteractiveForwarding:
         mock_settings.get_project_agents_dir.return_value = None
         mock_settings.model_name = None
         mock_settings.model_provider = None
+        mock_settings.model_unsupported_modalities = frozenset()
         mock_settings.model_context_limit = None
         mock_settings.project_root = None
 
@@ -649,6 +771,7 @@ class TestCreateCliAgentInteractiveForwarding:
         mock_settings.get_project_agents_dir.return_value = None
         mock_settings.model_name = None
         mock_settings.model_provider = None
+        mock_settings.model_unsupported_modalities = frozenset()
         mock_settings.model_context_limit = None
         mock_settings.project_root = None
 
@@ -905,6 +1028,7 @@ class TestCreateCliAgentSkillsSources:
         # Needed by get_system_prompt() which formats model identity
         mock_settings.model_name = None
         mock_settings.model_provider = None
+        mock_settings.model_unsupported_modalities = frozenset()
         mock_settings.model_context_limit = None
         mock_settings.project_root = None
 
@@ -980,6 +1104,7 @@ class TestCreateCliAgentMemorySources:
         mock_settings.get_project_agents_dir.return_value = None
         mock_settings.model_name = None
         mock_settings.model_provider = None
+        mock_settings.model_unsupported_modalities = frozenset()
         mock_settings.model_context_limit = None
         mock_settings.project_root = tmp_path
 
@@ -1046,6 +1171,7 @@ class TestCreateCliAgentMemorySources:
         mock_settings.get_project_agents_dir.return_value = None
         mock_settings.model_name = None
         mock_settings.model_provider = None
+        mock_settings.model_unsupported_modalities = frozenset()
         mock_settings.model_context_limit = None
         mock_settings.project_root = None
 
@@ -1132,6 +1258,7 @@ class TestCreateCliAgentProjectContext:
         mock_settings.get_project_agents_dir.return_value = None
         mock_settings.model_name = None
         mock_settings.model_provider = None
+        mock_settings.model_unsupported_modalities = frozenset()
         mock_settings.model_context_limit = None
         mock_settings.project_root = None
         mock_settings.user_langchain_project = None
@@ -1209,6 +1336,7 @@ class TestCreateCliAgentProjectContext:
         mock_settings.get_project_agents_dir.return_value = None
         mock_settings.model_name = None
         mock_settings.model_provider = None
+        mock_settings.model_unsupported_modalities = frozenset()
         mock_settings.model_context_limit = None
         mock_settings.project_root = None
         mock_settings.user_langchain_project = None
@@ -1274,6 +1402,7 @@ class TestCreateCliAgentProjectContext:
         mock_settings.get_project_agents_dir.return_value = None
         mock_settings.model_name = None
         mock_settings.model_provider = None
+        mock_settings.model_unsupported_modalities = frozenset()
         mock_settings.model_context_limit = None
         mock_settings.project_root = None
         mock_settings.user_langchain_project = None
@@ -1329,6 +1458,7 @@ class TestCreateCliAgentProjectContext:
         mock_settings.get_project_agents_dir.return_value = None
         mock_settings.model_name = None
         mock_settings.model_provider = None
+        mock_settings.model_unsupported_modalities = frozenset()
         mock_settings.model_context_limit = None
         mock_settings.project_root = None
 
@@ -1385,6 +1515,7 @@ class TestMiddlewareStackConformance:
         mock_settings.get_project_agents_dir.return_value = None
         mock_settings.model_name = None
         mock_settings.model_provider = None
+        mock_settings.model_unsupported_modalities = frozenset()
         mock_settings.model_context_limit = None
         mock_settings.project_root = None
 
@@ -1450,6 +1581,7 @@ class TestEnableAskUser:
         mock_settings.get_project_agents_dir.return_value = None
         mock_settings.model_name = None
         mock_settings.model_provider = None
+        mock_settings.model_unsupported_modalities = frozenset()
         mock_settings.model_context_limit = None
         mock_settings.project_root = None
 
@@ -1569,33 +1701,6 @@ class TestLoadAsyncSubagents:
         config.write_text("this is not valid toml [[[")
         result = load_async_subagents(config)
         assert result == []
-
-
-class TestLsEntriesShim:
-    """Remind us to remove the `_ls_entries` compat shim in test_end_to_end.py.
-
-    The PyPI SDK <0.5 returns a raw `list` from `ls`; >=0.5 returns
-    `LsResult` with `.entries`. Once the pin is bumped to >=0.5.0 the shim
-    should be deleted and callers inlined to `backend.ls(path).entries`.
-    """
-
-    def test_remove_ls_entries_shim_when_sdk_pin_is_bumped(self) -> None:
-        import tomllib
-
-        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
-        with pyproject.open("rb") as f:
-            data = tomllib.load(f)
-
-        deps = data["project"]["dependencies"]
-        sdk_pin = next(d for d in deps if d.startswith("deepagents=="))
-        pinned_version = sdk_pin.split("==")[1]
-        major, minor = (int(x) for x in pinned_version.split(".")[:2])
-
-        assert (major, minor) < (0, 5), (
-            f"SDK pin is now {pinned_version} (>=0.5.0). "
-            "Delete `_ls_entries()` from test_end_to_end.py and inline "
-            "`backend.ls(path).entries` at call sites."
-        )
 
 
 class TestShellAllowListMiddleware:
@@ -1818,6 +1923,7 @@ class TestCreateCliAgentShellMiddlewareWiring:
         mock_settings.get_project_agents_dir.return_value = None
         mock_settings.model_name = None
         mock_settings.model_provider = None
+        mock_settings.model_unsupported_modalities = frozenset()
         mock_settings.model_context_limit = None
         mock_settings.project_root = None
         mock_settings.shell_allow_list = ["ls", "cat"]
