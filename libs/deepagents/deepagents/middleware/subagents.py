@@ -452,7 +452,7 @@ def _build_task_tool(  # noqa: C901
             value_error_msg = "Tool call ID is required for subagent invocation"
             raise ValueError(value_error_msg)
         subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, runtime)
-        result = subagent.invoke(subagent_state)
+        result = subagent.invoke(subagent_state, config=runtime.config, context=runtime.context)
         return _return_command_with_state_update(result, runtime.tool_call_id)
 
     async def atask(
@@ -467,7 +467,7 @@ def _build_task_tool(  # noqa: C901
             value_error_msg = "Tool call ID is required for subagent invocation"
             raise ValueError(value_error_msg)
         subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, runtime)
-        result = await subagent.ainvoke(subagent_state)
+        result = await subagent.ainvoke(subagent_state, config=runtime.config, context=runtime.context)
         return _return_command_with_state_update(result, runtime.tool_call_id)
 
     return StructuredTool.from_function(
@@ -558,6 +558,7 @@ class SubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
         subagents: Sequence[SubAgent | CompiledSubAgent] | None = None,
         system_prompt: str | None = TASK_SYSTEM_PROMPT,
         task_description: str | None = None,
+        context_schema: type[ContextT] | None = None,
         **deprecated_kwargs: Unpack[_DeprecatedKwargs],
     ) -> None:
         """Initialize the `SubAgentMiddleware`."""
@@ -611,6 +612,7 @@ class SubAgentMiddleware(AgentMiddleware[Any, ContextT, ResponseT]):
                 raise ValueError(msg)
             self._backend = backend
             self._subagents = subagents
+            self._context_schema = context_schema
             subagent_specs = self._get_subagents()
         else:
             msg = "SubAgentMiddleware requires either `backend` (new API) or `default_model` (deprecated API)"
