@@ -284,9 +284,11 @@ class StoreBackend(BackendProtocol):
         """
         raw_content = store_item.value.get("content")
         if raw_content is None:
-            msg = f"Store item does not contain valid content field. Namespace: {store_item.namespace} Key: {store_item.key} Keys present: {list(store_item.value.keys())}"
-            print(f"DEBUG-CONVERT: {msg}")
-            raise ValueError(msg)
+            raw_content = store_item.value.get("page_content")
+            if raw_content is None:
+                msg = f"Store item does not contain valid content field. Namespace: {store_item.namespace} Key: {store_item.key} Keys present: {list(store_item.value.keys())}"
+                print(f"DEBUG-CONVERT: {msg}")
+                raise ValueError(msg)
 
         # BACKWARDS COMPAT: legacy list[str] format
         if isinstance(raw_content, list):

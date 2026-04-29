@@ -47,6 +47,16 @@ from deepagents.profiles import _get_harness_profile, _HarnessProfile
 
 logger = logging.getLogger(__name__)
 
+
+def _ensure_middleware(
+    stack: list[AgentMiddleware[Any, Any, Any]],
+    default_factory: Callable[[], AgentMiddleware[Any, Any, Any]],
+    middleware_type: type[AgentMiddleware[Any, Any, Any]],
+) -> None:
+    """Add default middleware to stack if no instance of middleware_type exists."""
+    if not any(isinstance(m, middleware_type) for m in stack):
+        stack.insert(0, default_factory())
+
 BASE_AGENT_PROMPT = """You are a Deep Agent, an AI assistant that helps users accomplish tasks using tools. You respond with text and tool calls. The user can see your responses and tool outputs in real time.
 
 ## Core Behavior
@@ -234,6 +244,7 @@ def create_deep_agent(  # noqa: C901, PLR0912, PLR0915  # Complex graph assembly
     debug: bool = False,
     name: str | None = None,
     cache: BaseCache | None = None,
+    include_defaults: bool = True,
 ) -> CompiledStateGraph[AgentState[ResponseT], ContextT, _InputAgentState, _OutputAgentState[ResponseT]]:  # ty: ignore[invalid-type-arguments]  # ty can't verify generic TypedDicts satisfy StateLike bound
     """Create a Deep Agent.
 
@@ -441,7 +452,6 @@ def create_deep_agent(  # noqa: C901, PLR0912, PLR0915  # Complex graph assembly
 
     # Build general-purpose subagent with default middleware stack
     gp_middleware: list[AgentMiddleware[Any, Any, Any]] = [
-        TodoListMiddleware(),
         FilesystemMiddleware(
             backend=backend,
             custom_tool_descriptions=_profile.tool_description_overrides,
@@ -449,6 +459,9 @@ def create_deep_agent(  # noqa: C901, PLR0912, PLR0915  # Complex graph assembly
         create_summarization_middleware(model, backend),
         PatchToolCallsMiddleware(),
     ]
+    if include_defaults:
+        _ensure_middleware(gp_middleware, TodoListMiddleware, TodoListMiddleware)
+
     if skills is not None:
         gp_middleware.append(SkillsMiddleware(backend=backend, sources=skills))
 
@@ -498,7 +511,6 @@ def create_deep_agent(  # noqa: C901, PLR0912, PLR0915  # Complex graph assembly
 
             # Build middleware: base stack + skills (if specified) + user's middleware
             subagent_middleware: list[AgentMiddleware[Any, Any, Any]] = [
-                TodoListMiddleware(),
                 FilesystemMiddleware(
                     backend=backend,
                     custom_tool_descriptions=_subagent_profile.tool_description_overrides,
@@ -506,10 +518,12 @@ def create_deep_agent(  # noqa: C901, PLR0912, PLR0915  # Complex graph assembly
                 create_summarization_middleware(subagent_model, backend),
                 PatchToolCallsMiddleware(),
             ]
+            subagent_middleware.extend(spec.get("middleware", []))
             subagent_skills = spec.get("skills")
             if subagent_skills:
                 subagent_middleware.append(SkillsMiddleware(backend=backend, sources=subagent_skills))
-            subagent_middleware.extend(spec.get("middleware", []))
+            if include_defaults:
+                _ensure_middleware(subagent_middleware, TodoListMiddleware, TodoListMiddleware)
 
             # Provider-specific middleware for this subagent's model
             subagent_middleware.extend(_resolve_extra_middleware(_subagent_profile))
@@ -548,11 +562,17 @@ def create_deep_agent(  # noqa: C901, PLR0912, PLR0915  # Complex graph assembly
         inline_subagents.insert(0, general_purpose_spec)
 
     # Build main agent middleware stack
-    deepagent_middleware: list[AgentMiddleware[Any, Any, Any]] = [
-        TodoListMiddleware(),
-    ]
+    deepagent_middleware: list[AgentMiddleware[Any, Any, Any]] = []
+
     if skills is not None:
         deepagent_middleware.append(SkillsMiddleware(backend=backend, sources=skills))
+
+    if middleware:
+        deepagent_middleware.extend(middleware)
+
+    if include_defaults:
+        _ensure_middleware(deepagent_middleware, TodoListMiddleware, TodoListMiddleware)
+
     deepagent_middleware.extend(
         [
             FilesystemMiddleware(
@@ -580,8 +600,6 @@ def create_deep_agent(  # noqa: C901, PLR0912, PLR0915  # Complex graph assembly
         # Currently this supports agents deployed via LangSmith deployments.
         deepagent_middleware.append(AsyncSubAgentMiddleware(async_subagents=async_subagents))
 
-    if middleware:
-        deepagent_middleware.extend(middleware)
     # Provider-specific middleware goes between user middleware and memory so
     # that memory updates (which change the system prompt) don't invalidate the
     # Anthropic prompt cache prefix.

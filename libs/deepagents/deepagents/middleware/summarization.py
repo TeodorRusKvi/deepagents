@@ -381,9 +381,10 @@ class _DeepAgentsSummarizationMiddleware(AgentMiddleware):
             tool_runtime = ToolRuntime(
                 state=state,
                 context=runtime.context,
-                stream_writer=runtime.stream_writer,
-                store=runtime.store,
                 config=config,
+                stream_writer=runtime.stream_writer,
+                tools=[],
+                store=runtime.store,
                 tool_call_id=None,
             )
             return self._backend(tool_runtime)  # ty: ignore[call-top-callable, invalid-argument-type]
