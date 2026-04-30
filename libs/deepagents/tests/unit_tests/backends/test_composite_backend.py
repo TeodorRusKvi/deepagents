@@ -1400,3 +1400,35 @@ def test_edit_result_path_restored_to_full_routed_path():
 
     assert res.error is None
     assert res.path == "/memories/notes.md"  # not "/notes.md"
+
+def test_composite_backend_strip_prefix_false():
+    """Test that strip_prefix=False preserves full paths in routed backends."""
+    mem_store = InMemoryStore()
+    
+    class CaptureBackend(StoreBackend):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.captured_keys = []
+            
+        def read(self, key, **kwargs):
+            self.captured_keys.append(key)
+            return super().read(key, **kwargs)
+            
+        def write(self, key, *args, **kwargs):
+            self.captured_keys.append(key)
+            return super().write(key, *args, **kwargs)
+
+    capture_be = CaptureBackend(store=mem_store, namespace=lambda _: ("test",))
+    comp = CompositeBackend(
+        default=StoreBackend(store=mem_store, namespace=lambda _: ("default",)),
+        routes={"/memories/": capture_be},
+        strip_prefix=False
+    )
+
+    # Write should preserve full path
+    comp.write("/memories/note.txt", "content")
+    assert "/memories/note.txt" in capture_be.captured_keys
+    
+    # Read should preserve full path
+    comp.read("/memories/note.txt")
+    assert "/memories/note.txt" in capture_be.captured_keys

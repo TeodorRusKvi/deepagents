@@ -3,13 +3,13 @@
 These templates are rendered by the bundler with values from
 `~deepagents_cli.deploy.config.DeployConfig`.
 
-The generated ``deploy_graph.py`` uses a ``CompositeBackend`` with all
-managed content under ``/memories/`` — ``/memories/AGENTS.md``,
-``/memories/skills/``, and ``/memories/user/`` (per-user templates) —
-backed by ``StoreBackend`` instances.  The configured sandbox is the
+The generated `deploy_graph.py` uses a `CompositeBackend` with all
+managed content under `/memories/` — `/memories/AGENTS.md`,
+`/memories/skills/`, and `/memories/user/` (per-user templates) —
+backed by `StoreBackend` instances.  The configured sandbox is the
 default writable backend.  Write access is controlled via
-``FilesystemPermission`` rules derived from each file's YAML frontmatter
-``permissions`` field.
+`FilesystemPermission` rules derived from each file's YAML frontmatter
+`permissions` field.
 
 There is no hub path and no custom Python tools.
 """
@@ -29,28 +29,78 @@ SANDBOX_BLOCK_LANGSMITH = '''\
 from deepagents.backends.langsmith import LangSmithSandbox
 
 _SANDBOXES: dict = {}
+_SANDBOX_FS_CAPACITY_BYTES = 16 * 1024**3
 
 
 def _get_or_create_sandbox(cache_key):
-    """Get or create a LangSmith sandbox cached by ``cache_key``."""
+    """Get or create a LangSmith sandbox cached by `cache_key`.
+
+    Uses raw `os.environ` (not the CLI's `resolve_env_var`) because the
+    deployed bundle cannot import `deepagents_cli` internals;
+    `DEEPAGENTS_CLI_`-prefixed vars are not honored here.
+    """
     if cache_key in _SANDBOXES:
         return _SANDBOXES[cache_key]
 
-    from langsmith.sandbox import ResourceNotFoundError, SandboxClient
+    from langsmith.sandbox import SandboxClient
 
     api_key = (
         os.environ.get("LANGSMITH_SANDBOX_API_KEY")
         or os.environ.get("LANGSMITH_API_KEY")
-        or os.environ["LANGCHAIN_API_KEY"]
+        or os.environ.get("LANGCHAIN_API_KEY")
     )
+    if not api_key:
+        raise RuntimeError(
+            "No LangSmith sandbox API key found. Set "
+            "LANGSMITH_SANDBOX_API_KEY, LANGSMITH_API_KEY, or LANGCHAIN_API_KEY."
+        )
     client = SandboxClient(api_key=api_key)
 
-    try:
-        client.get_template(SANDBOX_TEMPLATE)
-    except ResourceNotFoundError:
-        client.create_template(name=SANDBOX_TEMPLATE, image=SANDBOX_IMAGE)
+    snapshot_id = os.environ.get("LANGSMITH_SANDBOX_SNAPSHOT_ID")
+    if not snapshot_id:
+        snapshot_name = (
+            os.environ.get("LANGSMITH_SANDBOX_SNAPSHOT_NAME") or SANDBOX_SNAPSHOT
+        )
+        try:
+            snapshots = client.list_snapshots()
+        except Exception as e:
+            raise RuntimeError(f"Failed to list snapshots: {e}") from e
 
-    sandbox = client.create_sandbox(template_name=SANDBOX_TEMPLATE)
+        snapshot_id = None
+        non_ready_status = None
+        for snap in snapshots:
+            if snap.name != snapshot_name:
+                continue
+            if snap.status == "ready":
+                snapshot_id = snap.id
+                break
+            non_ready_status = snap.status
+
+        if snapshot_id is None:
+            if non_ready_status is not None:
+                raise RuntimeError(
+                    f"Snapshot {snapshot_name!r} exists but is "
+                    f"in state {non_ready_status!r}. Wait for it to finish "
+                    "building, or delete it to rebuild."
+                )
+            try:
+                snapshot = client.create_snapshot(
+                    name=snapshot_name,
+                    docker_image=SANDBOX_IMAGE,
+                    fs_capacity_bytes=_SANDBOX_FS_CAPACITY_BYTES,
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to build snapshot {snapshot_name!r}: {e}"
+                ) from e
+            snapshot_id = snapshot.id
+
+    try:
+        sandbox = client.create_sandbox(snapshot_id=snapshot_id)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to create sandbox from snapshot {snapshot_id!r}: {e}"
+        ) from e
     backend = LangSmithSandbox(sandbox)
     _SANDBOXES[cache_key] = backend
     logger.info(
@@ -60,6 +110,7 @@ def _get_or_create_sandbox(cache_key):
     )
     return backend
 '''
+"""Sandbox creation block for the LangSmith provider."""
 
 SANDBOX_BLOCK_DAYTONA = '''\
 from langchain_daytona import DaytonaSandbox
@@ -68,7 +119,7 @@ _SANDBOXES: dict = {}
 
 
 def _get_or_create_sandbox(cache_key):
-    """Get or create a Daytona sandbox cached by ``cache_key``."""
+    """Get or create a Daytona sandbox cached by `cache_key`."""
     if cache_key in _SANDBOXES:
         return _SANDBOXES[cache_key]
 
@@ -81,6 +132,7 @@ def _get_or_create_sandbox(cache_key):
     logger.info("Created Daytona sandbox %s for cache_key %s", sandbox.id, cache_key)
     return backend
 '''
+"""Sandbox creation block for the Daytona provider."""
 
 SANDBOX_BLOCK_MODAL = '''\
 from langchain_modal import ModalSandbox
@@ -89,7 +141,7 @@ _SANDBOXES: dict = {}
 
 
 def _get_or_create_sandbox(cache_key):
-    """Get or create a Modal sandbox cached by ``cache_key``."""
+    """Get or create a Modal sandbox cached by `cache_key`."""
     if cache_key in _SANDBOXES:
         return _SANDBOXES[cache_key]
 
@@ -102,6 +154,7 @@ def _get_or_create_sandbox(cache_key):
     logger.info("Created Modal sandbox for cache_key %s", cache_key)
     return backend
 '''
+"""Sandbox creation block for the Modal provider."""
 
 SANDBOX_BLOCK_RUNLOOP = '''\
 from langchain_runloop import RunloopSandbox
@@ -110,7 +163,7 @@ _SANDBOXES: dict = {}
 
 
 def _get_or_create_sandbox(cache_key):
-    """Get or create a Runloop devbox cached by ``cache_key``."""
+    """Get or create a Runloop devbox cached by `cache_key`."""
     if cache_key in _SANDBOXES:
         return _SANDBOXES[cache_key]
 
@@ -123,6 +176,7 @@ def _get_or_create_sandbox(cache_key):
     logger.info("Created Runloop devbox %s for cache_key %s", devbox.id, cache_key)
     return backend
 '''
+"""Sandbox creation block for the Runloop provider."""
 
 SANDBOX_BLOCK_NONE = '''\
 from deepagents.backends.state import StateBackend
@@ -137,6 +191,7 @@ def _get_or_create_sandbox(cache_key):  # noqa: ARG001
         _STATE_BACKEND = StateBackend()
     return _STATE_BACKEND
 '''
+"""Fallback block used when no sandbox provider is configured."""
 
 SANDBOX_BLOCKS = {
     "langsmith": (SANDBOX_BLOCK_LANGSMITH, None),
@@ -145,7 +200,207 @@ SANDBOX_BLOCKS = {
     "runloop": (SANDBOX_BLOCK_RUNLOOP, "langchain-runloop"),
     "none": (SANDBOX_BLOCK_NONE, None),
 }
-"""Map of provider -> (sandbox_block, requires_partner_package)."""
+"""Map of `provider -> (sandbox_block, requires_partner_package)`."""
+
+# ---------------------------------------------------------------------------
+# Per-provider auth blocks
+#
+# Each block defines the `@auth.authenticate` handler for a provider.
+# The shared `@auth.on` handler is appended to all providers automatically.
+# ---------------------------------------------------------------------------
+
+AUTH_ON_HANDLER = '''\
+
+
+@auth.on.threads
+async def add_owner(
+    ctx: Auth.types.AuthContext,
+    value: dict,
+):
+    """Scope all resources to the authenticated user."""
+    if is_studio_user(ctx.user):
+        return {}
+
+    filters = {"owner": ctx.user.identity}
+    metadata = value.setdefault("metadata", {})
+    metadata.update(filters)
+    return filters
+'''
+
+AUTH_BLOCK_SUPABASE = '''\
+"""Supabase auth for LangGraph deploy.
+
+Validates the Bearer token against Supabase's /auth/v1/user endpoint
+and scopes resources per authenticated user.
+"""
+
+import os
+
+import httpx
+from langgraph_sdk import Auth
+from langgraph_sdk.auth import is_studio_user
+
+auth = Auth()
+
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_PUBLISHABLE_DEFAULT_KEY = os.environ["SUPABASE_PUBLISHABLE_DEFAULT_KEY"]
+
+_http_client = httpx.AsyncClient()
+
+
+def _is_public_path(path: str) -> bool:
+    """Paths the browser fetches before the user has any auth token.
+
+    The frontend HTML, its assets, and the health check must be reachable
+    without a Bearer token — otherwise the sign-in UI can never load and
+    the user can't produce a token in the first place.
+    """
+    if path in ("/app", "/healthz", "/favicon.ico"):
+        return True
+    return path.startswith("/app/") or path.startswith("/.well-known/")
+
+
+@auth.authenticate
+async def get_current_user(
+    authorization: str | None,
+    path: str,
+) -> Auth.types.MinimalUserDict:
+    """Validate Supabase token and return user identity."""
+    if _is_public_path(path):
+        return {"identity": "anonymous"}
+
+    if not authorization or not authorization.startswith("Bearer "):
+        raise Auth.exceptions.HTTPException(
+            status_code=401, detail="Missing or invalid authorization header"
+        )
+
+    token = authorization.removeprefix("Bearer ").strip()
+
+    response = await _http_client.get(
+        f"{SUPABASE_URL}/auth/v1/user",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "apikey": SUPABASE_PUBLISHABLE_DEFAULT_KEY,
+        },
+    )
+
+    if response.status_code != 200:
+        raise Auth.exceptions.HTTPException(
+            status_code=401, detail="Invalid or expired token"
+        )
+
+    user = response.json()
+    return {
+        "identity": user["id"],
+        "display_name": user.get("email", ""),
+    }
+'''
+
+AUTH_BLOCK_CLERK = '''\
+"""Clerk auth for LangGraph deploy.
+
+Fetches JWKS from Clerk's API, caches the signing keys, and verifies
+the session JWT locally. Scopes resources per authenticated user.
+"""
+
+import os
+
+import jwt as pyjwt
+from jwt import PyJWKClient
+from langgraph_sdk import Auth
+from langgraph_sdk.auth import is_studio_user
+
+auth = Auth()
+
+CLERK_SECRET_KEY = os.environ["CLERK_SECRET_KEY"]
+
+_jwks_client = PyJWKClient(
+    "https://api.clerk.com/v1/jwks",
+    headers={
+        "Authorization": f"Bearer {CLERK_SECRET_KEY}",
+        "User-Agent": "deepagents-deploy/1.0",
+    },
+)
+
+
+def _is_public_path(path: str) -> bool:
+    """Paths the browser fetches before the user has any auth token.
+
+    The frontend HTML, its assets, and the health check must be reachable
+    without a Bearer token — otherwise the sign-in UI can never load and
+    the user can't produce a token in the first place.
+    """
+    if path in ("/app", "/healthz", "/favicon.ico"):
+        return True
+    return path.startswith("/app/") or path.startswith("/.well-known/")
+
+
+@auth.authenticate
+async def get_current_user(
+    authorization: str | None,
+    path: str,
+) -> Auth.types.MinimalUserDict:
+    """Validate Clerk session JWT and return user identity."""
+    if _is_public_path(path):
+        return {"identity": "anonymous"}
+
+    if not authorization or not authorization.startswith("Bearer "):
+        raise Auth.exceptions.HTTPException(
+            status_code=401, detail="Missing or invalid authorization header"
+        )
+
+    token = authorization.removeprefix("Bearer ").strip()
+
+    try:
+        signing_key = _jwks_client.get_signing_key_from_jwt(token)
+        payload = pyjwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+        )
+    except pyjwt.exceptions.PyJWTError as exc:
+        raise Auth.exceptions.HTTPException(
+            status_code=401, detail=f"Invalid token: {exc}"
+        )
+
+    return {
+        "identity": payload["sub"],
+        "display_name": payload.get("email", payload.get("name", "")),
+    }
+'''
+
+AUTH_BLOCK_ANONYMOUS = '''\
+"""Anonymous-mode auth for LangGraph deploy.
+
+Generated when [auth].provider = "anonymous". Overrides
+LangSmith Cloud\'s default x-api-key requirement so the bundled
+frontend can reach /threads etc.
+
+Per-browser thread isolation is enforced client-side via the
+dap_anon_id metadata filter on threads.search. This file just
+makes the API reachable; anyone with the deploy URL can call the
+API directly via curl.
+"""
+
+from langgraph_sdk import Auth
+from langgraph_sdk.auth import is_studio_user  # noqa: F401 — used by shared handler
+
+auth = Auth()
+
+
+@auth.authenticate
+async def get_current_user(
+    authorization: str | None,
+) -> Auth.types.MinimalUserDict:
+    return {"identity": "anonymous"}
+'''
+
+AUTH_BLOCKS: dict[str, tuple[str, str | None]] = {
+    "supabase": (AUTH_BLOCK_SUPABASE, None),
+    "clerk": (AUTH_BLOCK_CLERK, "pyjwt"),
+    "anonymous": (AUTH_BLOCK_ANONYMOUS, None),
+}
+"""Map of auth provider -> (auth_block_template, optional_pip_dependency)."""
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +566,7 @@ async def _load_subagent_mcp_tools(mcp_config):
 # User memories are namespaced per (assistant_id, user_id) so each
 # user gets their own copy.  Template files are seeded on first access
 # (only if not already present).  Write access is controlled per-file
-# via frontmatter ``permissions: read-write`` declarations.
+# via frontmatter `permissions: read-write` declarations.
 #
 # The bundler ships `_seed.json` containing all payloads; the factory
 # seeds each namespace once per (process, assistant_id) and user
@@ -352,7 +607,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SANDBOX_TEMPLATE = {sandbox_template!r}
+SANDBOX_SNAPSHOT = {sandbox_snapshot!r}
 SANDBOX_IMAGE = {sandbox_image!r}
 
 # Mount points inside the composite backend.
@@ -474,7 +729,7 @@ _SEEDED_USERS: set[tuple[str, str]] = set()
 
 
 async def _seed_store_if_needed(store, assistant_id: str) -> None:
-    """Seed memories + skills under ``assistant_id`` once per process."""
+    """Seed memories + skills under `assistant_id` once per process."""
     if assistant_id in _SEEDED_ASSISTANTS:
         return
     _SEEDED_ASSISTANTS.add(assistant_id)
@@ -551,7 +806,7 @@ def _make_namespace_factory(assistant_id: str, *extra: str):
 def _make_user_namespace_factory(assistant_id: str):
     """Return a namespace factory that includes the user_id.
 
-    Uses ``rt.server_info.user.identity`` from custom auth.  The platform
+    Uses `rt.server_info.user.identity` from custom auth.  The platform
     always injects user_id from auth, so no configurable fallback is needed.
     """
     def _factory(rt):
@@ -613,8 +868,8 @@ def _build_backend_factory(assistant_id: str):
 async def make_graph(config: RunnableConfig, runtime: "ServerRuntime"):
     """Async graph factory.
 
-    Accepts the invocation's ``RunnableConfig`` for ``assistant_id`` and
-    the ``ServerRuntime`` for ``store`` and ``user.identity``.  Seeds
+    Accepts the invocation's `RunnableConfig` for `assistant_id` and
+    the `ServerRuntime` for `store` and `user.identity`.  Seeds
     memories + skills once per (process, assistant_id), and user memories
     once per (process, assistant_id, user_id).  Gracefully skips user
     memory features when no user_id is available.
@@ -678,6 +933,7 @@ async def make_graph(config: RunnableConfig, runtime: "ServerRuntime"):
 
 graph = make_graph
 '''
+"""Generated `deploy_graph.py` source — the server entry point."""
 
 
 # ---------------------------------------------------------------------------
@@ -696,3 +952,57 @@ dependencies = [
 [tool.setuptools]
 py-modules = []
 """
+"""Generated `pyproject.toml` source for the deployed bundle."""
+
+
+# ---------------------------------------------------------------------------
+# app.py (Starlette static mount)
+# ---------------------------------------------------------------------------
+
+APP_PY_TEMPLATE = '''\
+"""Starlette app mounting the bundled chat UI on /app.
+
+Generated by `deepagent deploy`. LangGraph Platform reads the `http.app`
+key in `langgraph.json` and attaches this app alongside the graph.
+
+Uses Starlette directly (not FastAPI) because Starlette is already a
+transitive dep of langgraph-cli / langgraph-api in both the dev runtime
+and the deployed runtime, whereas FastAPI would require an explicit
+install step that `langgraph dev` does not perform.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse, RedirectResponse
+from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
+
+_FRONTEND_DIR = Path(__file__).parent / "frontend_dist"
+
+
+async def healthz(_request):
+    return JSONResponse({"ok": True})
+
+
+async def app_root_redirect(_request):
+    # Starlette's Mount at "/app" matches "/app/*" — a bare "/app" 404s
+    # otherwise. Redirect so users typing the clean URL land correctly.
+    return RedirectResponse(url="/app/", status_code=308)
+
+
+app = Starlette(
+    routes=[
+        Route("/healthz", healthz),
+        Route("/app", app_root_redirect),
+        Mount(
+            "/app",
+            app=StaticFiles(directory=str(_FRONTEND_DIR), html=True),
+            name="frontend",
+        ),
+    ],
+)
+'''
+"""Generated `app.py` — a Starlette app that serves the frontend at /app."""
