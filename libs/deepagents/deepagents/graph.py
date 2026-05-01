@@ -657,6 +657,9 @@ def create_deep_agent(  # noqa: C901, PLR0912, PLR0915  # Complex graph assembly
             PatchToolCallsMiddleware(),
         ]
     )
+    if middleware:
+        deepagent_middleware.extend(middleware)
+
 
     if async_subagents:
         # Async here means that we run these subagents in a non-blocking manner.
