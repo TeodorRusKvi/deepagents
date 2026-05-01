@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 CACHE_FILE: Path = DEFAULT_CONFIG_DIR / "latest_version.json"
 UPDATE_STATE_FILE: Path = DEFAULT_CONFIG_DIR / "update_state.json"
 CACHE_TTL = 86_400  # 24 hours
+PYPI_TIMEOUT = (3.05, 10)
 
 _SDK_RELEASE_TIMES_KEY = "sdk_release_times"
 """`CACHE_FILE` key for cached SDK upload timestamps, keyed by version string."""
@@ -152,11 +153,7 @@ def get_latest_version(
         return None
 
     try:
-        resp = requests.get(
-            PYPI_URL,
-            headers={"User-Agent": USER_AGENT},
-            timeout=3,
-        )
+        resp = requests.get(PYPI_URL, headers={"User-Agent": USER_AGENT}, timeout=PYPI_TIMEOUT)
         resp.raise_for_status()
         payload = resp.json()
         stable: str = payload["info"]["version"]
@@ -164,8 +161,8 @@ def get_latest_version(
         if not releases:
             logger.debug("PyPI response missing or empty 'releases' key")
         prerelease = _latest_from_releases(releases, include_prereleases=True)
-    except (requests.RequestException, OSError, KeyError, json.JSONDecodeError):
-        logger.debug("Failed to fetch latest version from PyPI", exc_info=True)
+    except (requests.RequestException, OSError, KeyError, json.JSONDecodeError) as exc:
+        logger.debug("Failed to fetch latest version from PyPI: %s", exc, exc_info=True)
         return None
 
     release_times = _extract_release_times(
