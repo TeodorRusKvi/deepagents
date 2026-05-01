@@ -1,12 +1,23 @@
 {
   "mcpServers": {
-    "docs-langchain": {
-      "type": "http",
-      "url": "https://docs.langchain.com/mcp"
-    },
-    "reference-langchain": {
-      "type": "http",
-      "url": "https://reference.langchain.com/mcp"
+    "langgraph-docs-mcp": {
+      "command": "/Users/teodorrustadkvisberg/.local/bin/uv",
+      "args": [
+        "run",
+        "--project",
+        "/Users/teodorrustadkvisberg/projects/current/mcpdoc",
+        "mcpdoc",
+        "--urls",
+        "LangGraph:https://langchain-ai.github.io/langgraph/llms.txt",
+        "--urls",
+        "LangChain:https://python.langchain.com/llms.txt",
+        "--urls",
+        "Coolify:https://coolify.io/docs/llms.txt",
+        "--urls",
+        "CoolifyFull:https://coolify.io/docs/llms-full.txt",
+        "--transport",
+        "stdio"
+      ]
     }
   }
 }

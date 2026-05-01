@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import base64
+import os
+import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -67,6 +71,10 @@ from deepagents_acp.utils import (
     truncate_execute_command_for_display,
 )
 
+
+ATTACHMENTS_DIRNAME = "attachments"
+COMMANDS = {"/about", "/memory", "/init", "/restore"}
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -86,7 +94,10 @@ class AgentSessionContext:
 
     cwd: str
     mode: str
+    session_id: str
+    user_id: str = "default_user"
     model: str | None = None
+    mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio] | None = None
 
 
 class AgentServerACP(ACPAgent):
@@ -130,6 +141,7 @@ class AgentServerACP(ACPAgent):
         self._session_modes: dict[str, str] = {}
         self._session_mode_states: dict[str, SessionModeState] = {}
         self._session_models: dict[str, str] = {}  # Track current model per session
+        self._session_mcp_servers: dict[str, list[HttpMcpServer | SseMcpServer | McpServerStdio]] = {}
         self._cancelled = False
         self._session_plans: dict[str, list[dict[str, Any]]] = {}
         self._session_cwds: dict[str, str] = {}
@@ -233,6 +245,7 @@ class AgentServerACP(ACPAgent):
             mcp_servers = []
         session_id = uuid4().hex
         self._session_cwds[session_id] = cwd
+        self._session_mcp_servers[session_id] = mcp_servers
 
         # Initialize session state
         if self._modes is not None:
@@ -268,7 +281,7 @@ class AgentServerACP(ACPAgent):
                 available_modes=state.available_modes,
                 current_mode_id=mode_id,
             )
-            self._reset_agent(session_id)
+            await self._reset_agent(session_id)
         return SetSessionModeResponse()
 
     async def set_config_option(
@@ -303,7 +316,7 @@ class AgentServerACP(ACPAgent):
                     available_modes=state.available_modes,
                     current_mode_id=value,
                 )
-                self._reset_agent(session_id)
+                await self._reset_agent(session_id)
 
         elif config_id == "model":
             # Handle model switching
@@ -317,7 +330,7 @@ class AgentServerACP(ACPAgent):
                 # Update the session's model
                 self._session_models[session_id] = value
                 # Reset the agent to use the new model
-                self._reset_agent(session_id)
+                await self._reset_agent(session_id)
         else:
             msg = f"Unknown config option: {config_id}"
             raise RequestError(-32602, msg)
@@ -571,21 +584,140 @@ class AgentServerACP(ACPAgent):
             raw_input=tool_args,
         )
 
-    def _reset_agent(self, session_id: str) -> None:
+    async def _reset_agent(self, session_id: str) -> None:
         """Reset the agent instance, re-creating it from the factory if applicable."""
-        cwd = self._session_cwds.get(session_id)
-        if cwd is not None:
-            self._cwd = cwd
-        if isinstance(self._agent_factory, CompiledStateGraph):
-            self._agent = self._agent_factory
-        else:
-            mode = self._session_modes.get(
-                session_id,
-                self._modes.current_mode_id if self._modes is not None else "auto",
+        import traceback
+        try:
+            cwd = self._session_cwds.get(session_id)
+            if cwd is not None:
+                self._cwd = cwd
+            if isinstance(self._agent_factory, CompiledStateGraph):
+                self._agent = self._agent_factory
+            else:
+                mode = self._session_modes.get(
+                    session_id,
+                    self._modes.current_mode_id if self._modes is not None else "auto",
+                )
+                model = self._session_models.get(session_id) if self._models is not None else None
+                mcp_servers = self._session_mcp_servers.get(session_id)
+                context = AgentSessionContext(
+                    cwd=self._cwd, mode=mode, session_id=session_id, user_id="default_user", model=model, mcp_servers=mcp_servers
+                )
+                
+                if asyncio.iscoroutinefunction(self._agent_factory):
+                    self._agent = await self._agent_factory(context)
+                else:
+                    self._agent = self._agent_factory(context)
+        except Exception as e:
+            with open("agent_error.log", "a") as f:
+                f.write(f"\n--- ERROR AT _reset_agent ---\n")
+                f.write(f"Exception: {type(e).__name__}: {e}\n")
+                traceback.print_exc(file=f)
+            raise
+
+    def _save_attachment_bytes(self, data: bytes, *, session_id: str, suffix: str) -> str:
+        """Save attachment bytes under the session workspace.
+
+        Args:
+            data: Attachment bytes to persist.
+            session_id: Active ACP session identifier.
+            suffix: File suffix, including the leading dot.
+
+        Returns:
+            Absolute path to the saved attachment.
+        """
+
+        attachments_dir = Path(self._cwd) / ATTACHMENTS_DIRNAME / session_id
+        try:
+            attachments_dir.mkdir(parents=True, exist_ok=True)
+            file_path = attachments_dir / f"{uuid4().hex}{suffix}"
+            file_path.write_bytes(data)
+        except OSError:
+            return ""
+        return file_path.as_posix()
+
+    def _handle_command(self, session_id: str, text: str) -> str | None:
+        """Handle a simple slash command before sending text to the model."""
+
+        command = text.strip().split(maxsplit=1)[0]
+        if command not in COMMANDS:
+            return None
+
+        cwd = self._session_cwds.get(session_id, self._cwd)
+        mode = self._session_modes.get(
+            session_id,
+            self._modes.current_mode_id if self._modes is not None else "auto",
+        )
+
+        if command == "/about":
+            return (
+                "Deep Agents ACP server\n"
+                f"cwd: {cwd}\n"
+                f"mode: {mode}\n"
+                f"python: {os.sys.executable}\n"
             )
-            model = self._session_models.get(session_id) if self._models is not None else None
-            context = AgentSessionContext(cwd=self._cwd, mode=mode, model=model)
-            self._agent = self._agent_factory(context)
+        if command == "/memory":
+            agents_md = Path(cwd) / "AGENTS.md"
+            gemini_md = Path(cwd) / "GEMINI.md"
+            lines = [f"workspace_root: {cwd}"]
+            if agents_md.exists():
+                lines.append(f"AGENTS.md: {agents_md.as_posix()}")
+            elif gemini_md.exists():
+                lines.append(f"GEMINI.md: {gemini_md.as_posix()}")
+            return "\n".join(lines)
+        if command == "/init":
+            agents_md = Path(cwd) / "AGENTS.md"
+            if agents_md.exists():
+                return f"AGENTS.md already exists: {agents_md.as_posix()}"
+            agents_md.write_text(
+                "# AGENTS.md\n\nProject-specific instructions for the agent.\n",
+                encoding="utf-8",
+            )
+            return f"Created {agents_md.as_posix()}"
+        if command == "/restore":
+            return "Restore is not implemented in this prototype."
+        return None
+
+    def _persist_image_block(self, block: ImageContentBlock, *, session_id: str) -> None:
+        """Persist an incoming image attachment if it carries inline data."""
+
+        if not block.data:
+            return
+        mime_type = getattr(block, "mime_type", "") or "image/png"
+        suffix = ".png"
+        if mime_type == "image/jpeg":
+            suffix = ".jpg"
+        elif mime_type == "image/webp":
+            suffix = ".webp"
+        elif mime_type == "image/gif":
+            suffix = ".gif"
+        try:
+            data = base64.b64decode(block.data)
+        except ValueError:
+            return
+        self._save_attachment_bytes(data, session_id=session_id, suffix=suffix)
+
+    def _persist_embedded_resource_block(
+        self, block: EmbeddedResourceContentBlock, *, session_id: str
+    ) -> None:
+        """Persist embedded binary resources such as PDFs when available."""
+
+        resource = getattr(block, "resource", None)
+        if resource is None:
+            return
+        blob = getattr(resource, "blob", None)
+        if blob is None:
+            return
+        mime_type = getattr(resource, "mime_type", "") or "application/octet-stream"
+        suffix = ".pdf" if mime_type == "application/pdf" else ".bin"
+        if isinstance(blob, str):
+            try:
+                data = base64.b64decode(blob)
+            except ValueError:
+                return
+        else:
+            data = bytes(blob)
+        self._save_attachment_bytes(data, session_id=session_id, suffix=suffix)
 
     async def prompt(  # noqa: C901, PLR0912, PLR0915  # Complex streaming protocol handler with many branches
         self,
@@ -601,15 +733,47 @@ class AgentServerACP(ACPAgent):
         **kwargs: Any,  # noqa: ARG002  # ACP protocol interface parameter
     ) -> PromptResponse:
         """Process a user prompt and stream the agent response."""
+        import traceback
+
+        try:
+            return await self._prompt_impl(prompt, session_id, message_id, **kwargs)
+        except Exception as e:
+            with open("agent_error.log", "a") as f:
+                f.write(f"\n--- ERROR AT {__name__} ---\n")
+                f.write(f"Exception: {type(e).__name__}: {e}\n")
+                traceback.print_exc(file=f)
+            raise
+
+    async def _prompt_impl(
+        self,
+        prompt: list[
+            TextContentBlock
+            | ImageContentBlock
+            | AudioContentBlock
+            | ResourceContentBlock
+            | EmbeddedResourceContentBlock
+        ],
+        session_id: str,
+        message_id: str | None = None,
+        **kwargs: Any,
+    ) -> PromptResponse:
         if self._agent is None:
-            self._reset_agent(session_id)
+            await self._reset_agent(session_id)
 
         if self._agent is None:
             msg = "Agent initialization failed"
             raise RuntimeError(msg)
 
-        if getattr(self._agent, "checkpointer", None) is None:
-            self._agent.checkpointer = MemorySaver()  # Guarded by getattr check above
+        # LangGraph/LangChain runnables might be wrapped in bindings.
+        # We need to look through to the underlying object to see if it has a checkpointer.
+        inner_agent = self._agent
+        while hasattr(inner_agent, "bound"):
+            inner_agent = inner_agent.bound
+
+        if getattr(inner_agent, "checkpointer", None) is None:
+            # Only default to MemorySaver if there is NO checkpointer at all
+            inner_agent.checkpointer = MemorySaver()
+        
         agent = self._agent
 
         # Reset cancellation flag for new prompt
@@ -617,11 +781,15 @@ class AgentServerACP(ACPAgent):
 
         # Convert ACP content blocks to LangChain multimodal content format
         content_blocks = []
+        first_text: str | None = None
 
         for block in prompt:
             if isinstance(block, TextContentBlock):
+                if first_text is None:
+                    first_text = block.text
                 content_blocks.extend(convert_text_block_to_content_blocks(block))
             elif isinstance(block, ImageContentBlock):
+                self._persist_image_block(block, session_id=session_id)
                 content_blocks.extend(convert_image_block_to_content_blocks(block))
             elif isinstance(block, AudioContentBlock):
                 content_blocks.extend(convert_audio_block_to_content_blocks(block))
@@ -630,7 +798,19 @@ class AgentServerACP(ACPAgent):
                     convert_resource_block_to_content_blocks(block, root_dir=self._cwd)
                 )
             elif isinstance(block, EmbeddedResourceContentBlock):
+                self._persist_embedded_resource_block(block, session_id=session_id)
                 content_blocks.extend(convert_embedded_resource_block_to_content_blocks(block))
+
+        if first_text is not None:
+            command_output = self._handle_command(session_id, first_text)
+            if command_output is not None:
+                await self._conn.session_update(
+                    session_id=session_id,
+                    update=update_agent_message(text_block(command_output)),
+                    source="DeepAgent",
+                )
+                return PromptResponse(stop_reason="end_turn")
+
         # Stream the deep agent response with multimodal content
         config: RunnableConfig = {"configurable": {"thread_id": session_id}}
 
@@ -641,140 +821,145 @@ class AgentServerACP(ACPAgent):
         current_state = None
         user_decisions = []
 
-        while current_state is None or current_state.interrupts:
-            # Check for cancellation
-            if self._cancelled:
-                self._cancelled = False  # Reset for next prompt
-                return PromptResponse(stop_reason="cancelled")
-
-            async for stream_chunk in agent.astream(
-                Command(resume={"decisions": user_decisions})
-                if user_decisions
-                else {"messages": [{"role": "user", "content": content_blocks}]},
-                config=config,
-                stream_mode=["messages", "updates"],
-                subgraphs=True,
-            ):
-                _expected_len = 3  # (namespace, stream_mode, data)
-                if not isinstance(stream_chunk, tuple) or len(stream_chunk) != _expected_len:
-                    continue
-
-                _namespace, stream_mode, data = stream_chunk
-                # Check for cancellation during streaming
+        try:
+            while current_state is None or current_state.interrupts:
+                # Check for cancellation
                 if self._cancelled:
                     self._cancelled = False  # Reset for next prompt
                     return PromptResponse(stop_reason="cancelled")
 
-                if stream_mode == "updates":
-                    updates = data
-                    if isinstance(updates, dict) and "__interrupt__" in updates:
-                        interrupt_objs = updates.get("__interrupt__")
-                        if interrupt_objs:
-                            for interrupt_obj in interrupt_objs:
-                                interrupt_value = interrupt_obj.value
-                                if not isinstance(interrupt_value, dict):
-                                    raise RequestError(
-                                        -32600,
-                                        (
-                                            "ACP limitation: this agent raised a free-form "
-                                            "LangGraph interrupt(), which ACP cannot display.\n\n"
-                                            "ACP only supports human-in-the-loop permission "
-                                            "prompts with a fixed set of decisions "
-                                            "(approve/reject/edit).\n"
-                                            "Spec: https://agentclientprotocol.com/protocol/overview\n\n"
-                                            "Fix: use LangChain HumanInTheLoopMiddleware-style "
-                                            "interrupts (action_requests/review_configs).\n"
-                                            "Docs: https://docs.langchain.com/oss/python/langchain/"
-                                            "human-in-the-loop\n\n"
-                                            "This is a protocol limitation, not a bug in the agent."
-                                        ),
-                                        {"interrupt_value": interrupt_value},
-                                    )
+                async for stream_chunk in agent.astream(
+                    Command(resume={"decisions": user_decisions})
+                    if user_decisions
+                    else {"messages": [{"role": "user", "content": content_blocks}]},
+                    config=config,
+                    stream_mode=["messages", "updates"],
+                    subgraphs=True,
+                ):
+                    _expected_len = 3  # (namespace, stream_mode, data)
+                    if not isinstance(stream_chunk, tuple) or len(stream_chunk) != _expected_len:
+                        continue
 
-                            current_state = await agent.aget_state(config)
-                            user_decisions = await self._handle_interrupts(
-                                current_state=current_state,
-                                session_id=session_id,
+                    _namespace, stream_mode, data = stream_chunk
+                    # Check for cancellation during streaming
+                    if self._cancelled:
+                        self._cancelled = False  # Reset for next prompt
+                        return PromptResponse(stop_reason="cancelled")
+
+                    if stream_mode == "updates":
+                        updates = data
+                        if isinstance(updates, dict) and "__interrupt__" in updates:
+                            interrupt_objs = updates.get("__interrupt__")
+                            if interrupt_objs:
+                                for interrupt_obj in interrupt_objs:
+                                    interrupt_value = interrupt_obj.value
+                                    if not isinstance(interrupt_value, dict):
+                                        raise RequestError(
+                                            -32600,
+                                            (
+                                                "ACP limitation: this agent raised a free-form "
+                                                "LangGraph interrupt(), which ACP cannot display.\n\n"
+                                                "ACP only supports human-in-the-loop permission "
+                                                "prompts with a fixed set of decisions "
+                                                "(approve/reject/edit).\n"
+                                                "Spec: https://agentclientprotocol.com/protocol/overview\n\n"
+                                                "Fix: use LangChain HumanInTheLoopMiddleware-style "
+                                                "interrupts (action_requests/review_configs).\n"
+                                                "Docs: https://docs.langchain.com/oss/python/langchain/"
+                                                "human-in-the-loop\n\n"
+                                                "This is a protocol limitation, not a bug in the agent."
+                                            ),
+                                            {"interrupt_value": interrupt_value},
+                                        )
+
+                                current_state = await agent.aget_state(config)
+                                user_decisions = await self._handle_interrupts(
+                                    current_state=current_state,
+                                    session_id=session_id,
+                                )
+                                break
+
+                        for node_name, update in updates.items():
+                            if node_name == "tools" and isinstance(update, dict) and "todos" in update:
+                                todos = update.get("todos", [])
+                                if todos:
+                                    await self._handle_todo_update(session_id, todos, log_plan=False)
+
+                        continue
+
+                    message_chunk, _metadata = data
+
+                    # Process tool call chunks
+                    await self._process_tool_call_chunks(
+                        session_id,
+                        message_chunk,
+                        active_tool_calls,
+                        tool_call_accumulator,
+                    )
+
+                    if isinstance(message_chunk, str):
+                        if not _namespace:
+                            await self._log_text(text=message_chunk, session_id=session_id)
+                    # Check for tool results (ToolMessage responses)
+                    elif hasattr(message_chunk, "type") and message_chunk.type == "tool":
+                        # This is a tool result message
+                        tool_call_id = getattr(message_chunk, "tool_call_id", None)
+                        if (
+                            tool_call_id
+                            and tool_call_id in active_tool_calls
+                            and active_tool_calls[tool_call_id].get("name") != "edit_file"
+                        ):
+                            # Update the tool call with completion status and result
+                            content = getattr(message_chunk, "content", "")
+                            tool_info = active_tool_calls[tool_call_id]
+                            tool_name = tool_info.get("name")
+
+                            # Format execute tool results specially
+                            if tool_name == "execute":
+                                tool_args = tool_info.get("args", {})
+                                command = tool_args.get("command", "")
+                                formatted_content = format_execute_result(
+                                    command=command, result=str(content)
+                                )
+                            else:
+                                formatted_content = str(content)
+                            update = update_tool_call(
+                                tool_call_id=tool_call_id,
+                                status="completed",
+                                content=[tool_content(text_block(formatted_content))],
                             )
-                            break
-
-                    for node_name, update in updates.items():
-                        if node_name == "tools" and isinstance(update, dict) and "todos" in update:
-                            todos = update.get("todos", [])
-                            if todos:
-                                await self._handle_todo_update(session_id, todos, log_plan=False)
-
-                    continue
-
-                message_chunk, _metadata = data
-
-                # Process tool call chunks
-                await self._process_tool_call_chunks(
-                    session_id,
-                    message_chunk,
-                    active_tool_calls,
-                    tool_call_accumulator,
-                )
-
-                if isinstance(message_chunk, str):
-                    if not _namespace:
-                        await self._log_text(text=message_chunk, session_id=session_id)
-                # Check for tool results (ToolMessage responses)
-                elif hasattr(message_chunk, "type") and message_chunk.type == "tool":
-                    # This is a tool result message
-                    tool_call_id = getattr(message_chunk, "tool_call_id", None)
-                    if (
-                        tool_call_id
-                        and tool_call_id in active_tool_calls
-                        and active_tool_calls[tool_call_id].get("name") != "edit_file"
-                    ):
-                        # Update the tool call with completion status and result
-                        content = getattr(message_chunk, "content", "")
-                        tool_info = active_tool_calls[tool_call_id]
-                        tool_name = tool_info.get("name")
-
-                        # Format execute tool results specially
-                        if tool_name == "execute":
-                            tool_args = tool_info.get("args", {})
-                            command = tool_args.get("command", "")
-                            formatted_content = format_execute_result(
-                                command=command, result=str(content)
+                            await self._conn.session_update(
+                                session_id=session_id, update=update, source="DeepAgent"
                             )
+
+                    elif message_chunk.content:
+                        # content can be a string or a list of content blocks
+                        if isinstance(message_chunk.content, str):
+                            text = message_chunk.content
+                        elif isinstance(message_chunk.content, list):
+                            # Extract text from content blocks
+                            text = ""
+                            for block in message_chunk.content:
+                                if isinstance(block, dict) and block.get("type") == "text":
+                                    text += block.get("text", "")
+                                elif isinstance(block, str):
+                                    text += block
                         else:
-                            formatted_content = str(content)
-                        update = update_tool_call(
-                            tool_call_id=tool_call_id,
-                            status="completed",
-                            content=[tool_content(text_block(formatted_content))],
-                        )
-                        await self._conn.session_update(
-                            session_id=session_id, update=update, source="DeepAgent"
-                        )
+                            text = str(message_chunk.content)
 
-                elif message_chunk.content:
-                    # content can be a string or a list of content blocks
-                    if isinstance(message_chunk.content, str):
-                        text = message_chunk.content
-                    elif isinstance(message_chunk.content, list):
-                        # Extract text from content blocks
-                        text = ""
-                        for block in message_chunk.content:
-                            if isinstance(block, dict) and block.get("type") == "text":
-                                text += block.get("text", "")
-                            elif isinstance(block, str):
-                                text += block
-                    else:
-                        text = str(message_chunk.content)
+                        if text and not _namespace:
+                            await self._log_text(text=text, session_id=session_id)
 
-                    if text and not _namespace:
-                        await self._log_text(text=text, session_id=session_id)
-
-            # After streaming completes, check if we need to exit the loop
-            # The loop continues while there are interrupts (line 467)
-            # We get the current state to check the loop condition
-            current_state = await agent.aget_state(config)
-            # Note: Interrupts are handled during streaming via __interrupt__ updates
-            # This state check is only for the while loop condition
+                # After streaming completes, check if we need to exit the loop
+                # The loop continues while there are interrupts (line 467)
+                # We get the current state to check the loop condition
+                current_state = await agent.aget_state(config)
+                # Note: Interrupts are handled during streaming via __interrupt__ updates
+                # This state check is only for the while loop condition
+        except Exception:
+            import traceback as _traceback
+            _traceback.print_exc()
+            raise
 
         return PromptResponse(stop_reason="end_turn")
 

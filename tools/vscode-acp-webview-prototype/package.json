@@ -1,0 +1,32 @@
+{
+  "name": "vscode-acp-webview-prototype",
+  "displayName": "ACP Webview Prototype",
+  "description": "Local VS Code webview prototype for a custom Deep Agents UI.",
+  "version": "0.0.1",
+  "private": true,
+  "engines": {
+    "vscode": "^1.88.0"
+  },
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onCommand:acpPrototype.openPanel"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "acpPrototype.openPanel",
+        "title": "ACP Prototype: Open Panel"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p ./tsconfig.json",
+    "watch": "tsc -w -p ./tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.88.0",
+    "typescript": "^5.4.5",
+    "vscode": "^1.1.48"
+  }
+}
+

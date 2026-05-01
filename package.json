@@ -1,0 +1,5 @@
+{
+	"devDependencies": {
+		"@zed-industries/codex-acp": "^0.11.1"
+	}
+}
