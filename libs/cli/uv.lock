@@ -987,7 +987,7 @@ wheels = [
 
 [[package]]
 name = "deepagents"
-version = "0.5.5"
+version = "0.5.6"
 source = { editable = "../deepagents" }
 dependencies = [
     { name = "deepagents-acp" },
@@ -1018,7 +1018,7 @@ test = [
     { name = "pytest" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
     { name = "pytest-benchmark" },
-    { name = "pytest-codspeed" },
+    { name = "pytest-codspeed", specifier = ">=4.4.0,<5.0.0" },
     { name = "pytest-cov" },
     { name = "pytest-socket" },
     { name = "pytest-timeout", specifier = ">=2.3.1,<3.0.0" },
@@ -1045,7 +1045,7 @@ wheels = [
 
 [[package]]
 name = "deepagents-cli"
-version = "0.0.46"
+version = "0.0.50"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -1060,6 +1060,7 @@ dependencies = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint-sqlite" },
     { name = "langgraph-cli", extra = ["inmem"] },
+    { name = "langgraph-prebuilt" },
     { name = "langgraph-sdk" },
     { name = "langsmith", extra = ["sandbox"] },
     { name = "markdownify" },
@@ -1236,6 +1237,7 @@ requires-dist = [
     { name = "langgraph", specifier = ">=1.1.6,<2.0.0" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3.0.0,<4.0.0" },
     { name = "langgraph-cli", extras = ["inmem"], specifier = ">=0.4.15,<1.0.0" },
+    { name = "langgraph-prebuilt", specifier = ">=1.0.13,<2.0.0" },
     { name = "langgraph-sdk", specifier = ">=0.3.11,<1.0.0" },
     { name = "langsmith", extras = ["sandbox"], specifier = ">=0.7.32" },
     { name = "markdownify", specifier = ">=0.13.0,<2.0.0" },
@@ -1248,7 +1250,7 @@ requires-dist = [
     { name = "requests", specifier = ">=2.0.0,<3.0.0" },
     { name = "rich", specifier = ">=14.0.0,<15.0.0" },
     { name = "tavily-python", specifier = ">=0.7.21,<1.0.0" },
-    { name = "textual", specifier = ">=8.0.0,<9.0.0" },
+    { name = "textual", specifier = ">=8.2.5,<9.0.0" },
     { name = "textual-autocomplete", specifier = ">=3.0.0,<5.0.0" },
     { name = "textual-speedups", specifier = ">=0.2.1,<1.0.0" },
     { name = "tomli-w", specifier = ">=1.0.0,<2.0.0" },
@@ -1262,7 +1264,7 @@ test = [
     { name = "pytest", specifier = ">=8.3.4,<10.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.25.3,<2.0.0" },
     { name = "pytest-benchmark", specifier = ">=5.1.0,<6.0.0" },
-    { name = "pytest-codspeed", specifier = ">=4.0.0,<5.0.0" },
+    { name = "pytest-codspeed", specifier = ">=4.4.0,<5.0.0" },
     { name = "pytest-cov", specifier = ">=6.0.0,<8.0.0" },
     { name = "pytest-mock", specifier = ">=3.14.0,<4.0.0" },
     { name = "pytest-socket", specifier = ">=0.7.0,<1.0.0" },
